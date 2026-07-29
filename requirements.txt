@@ -1,0 +1,11 @@
+numpy>=1.23.0
+scipy>=1.9.0
+opencv-python>=4.7.0
+ultralytics>=8.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+onnxruntime>=1.15.0
+httpx>=0.24.0
+pydantic>=2.0.0
+pytest>=7.0.0
+gdown>=4.7.0
