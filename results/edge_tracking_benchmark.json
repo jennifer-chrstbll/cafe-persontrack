@@ -1,0 +1,22 @@
+{
+  "device_target": "Raspberry Pi 5 / Edge CPU",
+  "yolo11n_onnx_avg_ms": 93.23,
+  "yolo11n_onnx_std_ms": 12.84,
+  "bytetrack_avg_ms": 0.02,
+  "osnet_reid_crop_ms": 145.07,
+  "workload_performance": {
+    "1_people": {
+      "total_frame_ms": 107.75,
+      "estimated_fps": 9.3
+    },
+    "3_people": {
+      "total_frame_ms": 136.77,
+      "estimated_fps": 7.3
+    },
+    "5_people": {
+      "total_frame_ms": 165.78,
+      "estimated_fps": 6.0
+    }
+  },
+  "overall_status": "PASS"
+}

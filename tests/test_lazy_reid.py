@@ -26,5 +26,35 @@ class TestLazyReID(unittest.TestCase):
         norm = np.linalg.norm(feat)
         self.assertAlmostEqual(norm, 1.0, places=4)
 
+    def test_osnet_discriminative_reid(self):
+        extractor = OSNetExtractor()
+        
+        # Person A (Blue jacket, dark pants) - Photo 1
+        person_a1 = np.zeros((300, 200, 3), dtype=np.uint8)
+        person_a1[:150, :] = [255, 100, 0]   # Blue jacket
+        person_a1[150:, :] = [20, 20, 20]    # Dark pants
+        
+        # Person A (Blue jacket, dark pants) - Photo 2 with slight noise
+        person_a2 = np.zeros((300, 200, 3), dtype=np.uint8)
+        person_a2[:150, :] = [240, 95, 10]
+        person_a2[150:, :] = [25, 25, 25]
+
+        # Person B (Bright red shirt, yellow pants) - Distinct person
+        person_b = np.zeros((300, 200, 3), dtype=np.uint8)
+        person_b[:150, :] = [0, 0, 255]      # Bright Red shirt
+        person_b[150:, :] = [0, 255, 255]    # Yellow pants
+
+        feat_a1 = extractor.extract_feature(person_a1, (0, 0, 200, 300))
+        feat_a2 = extractor.extract_feature(person_a2, (0, 0, 200, 300))
+        feat_b  = extractor.extract_feature(person_b, (0, 0, 200, 300))
+
+        sim_same = OSNetExtractor.compute_similarity(feat_a1, feat_a2)
+        sim_diff = OSNetExtractor.compute_similarity(feat_a1, feat_b)
+
+        print(f"\n[TestDiscriminativeReID] Same Person Sim: {sim_same:.4f} | Different Person Sim: {sim_diff:.4f}")
+        self.assertGreater(sim_same, sim_diff)
+        self.assertGreater(sim_same, 0.70)
+        self.assertLess(sim_diff, 0.60)
+
 if __name__ == '__main__':
     unittest.main()

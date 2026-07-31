@@ -68,6 +68,27 @@ class CRMBackendClient:
             logger.debug(f"[CRMBackendClient] Occupancy log sync error: {e}")
             return False
 
+    async def bind_identity(self, customer_id: str, camera_id: str = "CAM_1", pos_x: float = 640.0, pos_y: float = 360.0) -> Dict[str, Any]:
+        """
+        Triggers Identity Association Engine at backend (/association/bind)
+        when a face recognition event occurs at cashier POS.
+        """
+        url = f"{self.backend_url}/association/bind"
+        payload = {
+            "customer_id": customer_id,
+            "camera_id": camera_id,
+            "pos_x": pos_x,
+            "pos_y": pos_y
+        }
+        try:
+            resp = await self.client.post(url, json=payload)
+            if resp.status_code == 200:
+                return resp.json()
+            return {"status": "UNMATCHED", "reason": f"HTTP_{resp.status_code}"}
+        except Exception as e:
+            logger.debug(f"[CRMBackendClient] Identity bind error: {e}")
+            return {"status": "UNMATCHED", "reason": str(e)}
+
     async def close(self):
         await self.client.aclose()
 

@@ -161,9 +161,17 @@ class OSNetExtractor:
             return None
 
         if self.onnx_session is not None:
-            input_name = self.onnx_session.get_inputs()[0].name
-            outputs = self.onnx_session.run(None, {input_name: crop_tensor})
-            feat_np = np.squeeze(outputs[0])
+            input_node = self.onnx_session.get_inputs()[0]
+            input_name = input_node.name
+            req_batch = input_node.shape[0] if (len(input_node.shape) > 0 and isinstance(input_node.shape[0], int)) else 1
+            if req_batch > 1 and crop_tensor.shape[0] < req_batch:
+                padded_tensor = np.zeros((req_batch, *crop_tensor.shape[1:]), dtype=np.float32)
+                padded_tensor[0] = crop_tensor[0]
+                outputs = self.onnx_session.run(None, {input_name: padded_tensor})
+                feat_np = outputs[0][0]
+            else:
+                outputs = self.onnx_session.run(None, {input_name: crop_tensor})
+                feat_np = np.squeeze(outputs[0])
         elif HAS_TORCH and getattr(self, 'model', None) is not None:
             with torch.no_grad():
                 t_input = torch.from_numpy(crop_tensor).to(self.device)

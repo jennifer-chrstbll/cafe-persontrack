@@ -260,8 +260,9 @@ class ByteTracker:
                                 sim_upper = OSNetExtractor.compute_similarity(det_upper_feat, cached_feat) if det_upper_feat is not None else 0.0
                                 sim = max(sim_full, sim_upper)
 
-                                # Adaptive occlusion recovery threshold (0.55)
-                                if sim >= 0.55 and sim > best_sim:
+                                # ReID similarity threshold from unified config
+                                reid_thresh = getattr(config, "REID_SIMILARITY_THRESH", 0.65)
+                                if sim >= reid_thresh and sim > best_sim:
                                     best_sim = sim
                                     best_lost_track = lost_track
 
@@ -279,13 +280,15 @@ class ByteTracker:
                             reconnected = True
                             print(f"[ByteTrack] Occlusion Recovery! Track #{best_lost_track.track_id} preserved after occlusion (Sim: {best_sim:.3f})")
 
-                # 5b. Spatial Centroid Proximity Fallback
+                # 5b. Dynamic Spatial Centroid Proximity Fallback
                 if not reconnected:
+                    frame_w = frame.shape[1] if frame is not None else 1280
+                    max_spatial_dist = 240.0 * (frame_w / 1280.0)
                     det_cx, det_cy = track.centroid
                     for lost_track in self.lost_stracks:
                         lost_cx, lost_cy = lost_track.centroid
                         dist = np.hypot(det_cx - lost_cx, det_cy - lost_cy)
-                        if dist <= 240.0:  # Spatial range
+                        if dist <= max_spatial_dist:  # Scaled spatial range
                             lost_track.re_activate(track, self.frame_id, new_id=False)
                             refind_stracks.append(lost_track)
                             reconnected = True
