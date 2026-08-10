@@ -26,21 +26,24 @@ REID_FEATURE_DIM = 512
 REID_IMAGE_SIZE = (128, 256)   # (width, height) for OSNet input
 
 # Transition Zone & Multi-Camera Parameters
-# Window time (in seconds) within which a track transition across cameras is matched
 TRANSITION_TIME_WINDOW_SEC = 5.0
 OCCLUSION_TIMEOUT_SEC = 3.0
 
-# Polygons for Transition Zones (Normalized coordinates [0.0..1.0] or Pixel coordinates)
-# Example: Area Tangga / Border between Camera 1 (Floor 1) and Camera 2 (Floor 2)
+# Polygons for Transition Zones (Normalized coordinates [0.0..1.0])
+# Area tangga / border between Camera 1 (Floor 1) and Camera 2 (Floor 2)
 DEFAULT_CAMERAS_CONFIG: Dict[str, Dict[str, Any]] = {
     "CAM_1": {
         "name": "CCTV Ceiling - Lantai 1 (Kasir & Tangga)",
         "floor": 1,
         "resolution": (1920, 1080),
+        # RTSP URL for CCTV Lantai 1 — webcam for simulation, real CCTV for production
+        # Webcam:   "rtsp_url": "0"  (or integer index)
+        # RTSP CCTV: "rtsp_url": "rtsp://admin:password@192.168.1.100:554/stream1"
+        "rtsp_url": os.getenv("CAM_1_URL", "0"),
         "transition_zones": [
             {
                 "zone_id": "TZ_STAIRS_FL1",
-                "polygon": [[0.70, 0.60], [0.95, 0.60], [0.95, 0.95], [0.70, 0.95]], # Normalized [x, y]
+                "polygon": [[0.70, 0.60], [0.95, 0.60], [0.95, 0.95], [0.70, 0.95]],
                 "target_camera": "CAM_2",
                 "target_zone": "TZ_STAIRS_FL2"
             }
@@ -50,10 +53,13 @@ DEFAULT_CAMERAS_CONFIG: Dict[str, Dict[str, Any]] = {
         "name": "CCTV Ceiling - Lantai 2 (Seating & Tangga)",
         "floor": 2,
         "resolution": (1920, 1080),
+        # Webcam:   "rtsp_url": "1"  (second USB webcam)
+        # RTSP CCTV: "rtsp_url": "rtsp://admin:password@192.168.1.101:554/stream1"
+        "rtsp_url": os.getenv("CAM_2_URL", "1"),
         "transition_zones": [
             {
                 "zone_id": "TZ_STAIRS_FL2",
-                "polygon": [[0.05, 0.05], [0.30, 0.05], [0.30, 0.40], [0.05, 0.40]], # Normalized [x, y]
+                "polygon": [[0.05, 0.05], [0.30, 0.05], [0.30, 0.40], [0.05, 0.40]],
                 "target_camera": "CAM_1",
                 "target_zone": "TZ_STAIRS_FL1"
             }
@@ -61,6 +67,12 @@ DEFAULT_CAMERAS_CONFIG: Dict[str, Dict[str, Any]] = {
     }
 }
 
-# Backend API Configuration
-BACKEND_API_URL = os.getenv("CRM_BACKEND_URL", "http://localhost:8001/api/v1")
-SYNC_INTERVAL_SEC = 1.0  # Send track & occupancy updates every 1 second
+# ────────────────────────────────────────────────────
+# Supabase Configuration (Direct DB Write — No Backend Server Needed)
+# Set these in a .env file or as environment variables on Raspberry Pi 5
+# ────────────────────────────────────────────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+# Sync interval — how often (seconds) to push occupancy count to Supabase
+SYNC_INTERVAL_SEC = 1.0
