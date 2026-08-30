@@ -92,3 +92,6 @@ YOLO26_PT_PATH    = os.path.join(BASE_DIR, "weights", "yolo26n.pt")
 
 # Active model selector: "yolo11" or "yolo26"
 ACTIVE_MODEL = "yolo11"  # Switch to "yolo11" to revert
+
+# PyTorch fallback weight for OSNet
+OSNET_PTH_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25_msmt17.pth")

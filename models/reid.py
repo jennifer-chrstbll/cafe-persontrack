@@ -114,7 +114,11 @@ class OSNetExtractor:
         if os.path.exists(onnx_path):
             try:
                 import onnxruntime as ort
-                self.onnx_session = ort.InferenceSession(onnx_path)
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = 2
+                opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if 'CUDAExecutionProvider' in ort.get_available_providers() else ['CPUExecutionProvider']
+                self.onnx_session = ort.InferenceSession(onnx_path, sess_options=opts, providers=providers)
                 print(f"[OSNetExtractor] Loaded ONNX ReID model from {onnx_path}")
             except Exception as e:
                 print(f"[OSNetExtractor] Failed ONNX load: {e}")
@@ -123,6 +127,13 @@ class OSNetExtractor:
             try:
                 self.device = torch.device(device)
                 self.model = OSNetx0_25(feature_dim=config.REID_FEATURE_DIM)
+                pth_path = getattr(config, 'OSNET_PTH_PATH', os.path.join(config.BASE_DIR, 'weights', 'osnet_x0_25_msmt17.pth'))
+                if os.path.exists(pth_path):
+                    state = torch.load(pth_path, map_location=self.device, weights_only=True)
+                    if isinstance(state, dict) and 'state_dict' in state:
+                        state = state['state_dict']
+                    self.model.load_state_dict(state, strict=False)
+                    print(f"[OSNetExtractor] Loaded PyTorch pretrained weights from {pth_path}")
                 self.model.to(self.device)
                 self.model.eval()
                 print("[OSNetExtractor] Initialized PyTorch OSNet-x0_25 ReID Feature Extractor.")
