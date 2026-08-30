@@ -1,278 +1,274 @@
 import os
 import cv2
 import numpy as np
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Optional
 import config
 
+
 class PersonDetection:
-    """Dataclass holding detection information for a person."""
-    def __init__(self, bbox: Tuple[float, float, float, float], conf: float, class_id: int = 0):
-        self.bbox = bbox  # (x1, y1, x2, y2)
+    """Single person detection result."""
+    def __init__(self, bbox: Tuple[float, float, float, float],
+                 conf: float, class_id: int = 0):
+        self.bbox = bbox
         self.conf = conf
         self.class_id = class_id
-        
-        # Calculate centroid & dimensions
         self.x1, self.y1, self.x2, self.y2 = bbox
-        self.width = max(1.0, self.x2 - self.x1)
+        self.width  = max(1.0, self.x2 - self.x1)
         self.height = max(1.0, self.y2 - self.y1)
-        self.centroid_x = self.x1 + self.width / 2.0
+        self.centroid_x = self.x1 + self.width  / 2.0
         self.centroid_y = self.y1 + self.height / 2.0
 
     @property
-    def tlwh(self) -> Tuple[float, float, float, float]:
-        """Top-left x, top-left y, width, height."""
+    def tlwh(self):
         return (self.x1, self.y1, self.width, self.height)
 
     @property
-    def centroid(self) -> Tuple[float, float]:
+    def centroid(self):
         return (self.centroid_x, self.centroid_y)
 
 
+# ── Image enhancement ─────────────────────────────────────────────────────────
+_clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+
+def enhance_frame(frame: np.ndarray) -> np.ndarray:
+    """CLAHE + unsharp mask. Compensates blur & low contrast of CCTV footage."""
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l_eq = _clahe.apply(l)
+    blur = cv2.GaussianBlur(l_eq, (0, 0), sigmaX=3)
+    l_sh = np.clip(cv2.addWeighted(l_eq, 1.5, blur, -0.5, 0), 0, 255).astype(np.uint8)
+    return cv2.cvtColor(cv2.merge([l_sh, a, b]), cv2.COLOR_LAB2BGR)
+
+
+# ── ONNX inference primitives ─────────────────────────────────────────────────
+
+def _onnx_infer_yolo11(session, frame: np.ndarray,
+                       input_size: int,
+                       low_thresh: float,
+                       conf_thresh: float) -> List[PersonDetection]:
+    """
+    YOLO11 ONNX inference — standard NMS output format.
+    Output shape: (1, 84, 8400)
+    """
+    ih, iw = frame.shape[:2]
+    img = cv2.resize(frame, (input_size, input_size))
+    img = img[:, :, ::-1]  # BGR->RGB
+    blob = np.ascontiguousarray(img.transpose(2, 0, 1), dtype=np.float32)[None] / 255.0
+
+    out = session.run(None, {session.get_inputs()[0].name: blob})
+    pred = np.squeeze(out[0])  # (84, 8400)
+
+    scores = pred[4 + config.PERSON_CLASS_ID, :]
+    mask = scores >= low_thresh
+    if not mask.any():
+        return []
+
+    boxes = pred[:4, mask].T
+    scores = scores[mask]
+    sx, sy = iw / input_size, ih / input_size
+    cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    x1 = (cx - w / 2) * sx
+    y1 = (cy - h / 2) * sy
+    x2 = (cx + w / 2) * sx
+    y2 = (cy + h / 2) * sy
+
+    # Aspect ratio filter (relaxed for partial body / head-only crops)
+    ratio = (y2 - y1) / np.maximum(x2 - x1, 1.0)
+    valid = ratio >= 0.5
+    if not valid.any():
+        return []
+
+    boxes_tlwh = np.stack([x1[valid], y1[valid],
+                           (x2 - x1)[valid], (y2 - y1)[valid]], axis=1).tolist()
+    scores_l = scores[valid].tolist()
+    idxs = cv2.dnn.NMSBoxes(boxes_tlwh, scores_l,
+                            score_threshold=low_thresh, nms_threshold=0.45)
+    dets = []
+    for i in (np.array(idxs).flatten() if len(idxs) else []):
+        bx = boxes_tlwh[i]
+        dets.append(PersonDetection(
+            bbox=(bx[0], bx[1], bx[0] + bx[2], bx[1] + bx[3]),
+            conf=float(scores_l[i])))
+    return dets
+
+
+def _onnx_infer_yolo26(session, frame: np.ndarray,
+                       input_size: int,
+                       low_thresh: float,
+                       conf_thresh: float) -> List[PersonDetection]:
+    """
+    YOLO26 ONNX inference — NMS-free end-to-end output format.
+    Output shape: (1, 300, 6) where 6 = [x1, y1, x2, y2, conf, class_id]
+    Allows candidates down to low_thresh so ByteTrack can use them in Step 2.
+    """
+    ih, iw = frame.shape[:2]
+    img = cv2.resize(frame, (input_size, input_size))
+    img = img[:, :, ::-1]  # BGR->RGB
+    blob = np.ascontiguousarray(img.transpose(2, 0, 1), dtype=np.float32)[None] / 255.0
+
+    out = session.run(None, {session.get_inputs()[0].name: blob})
+    preds = out[0][0]  # (300, 6)
+
+    sx, sy = iw / input_size, ih / input_size
+    dets = []
+    for row in preds:
+        x1, y1, x2, y2, conf, cls_id = row
+        if int(cls_id) != config.PERSON_CLASS_ID:
+            continue
+        # Use low_thresh here identically to YOLO11 so ByteTrack gets low-confidence tier
+        if conf < low_thresh:
+            continue
+        # Scale back to original frame coords
+        x1 *= sx; y1 *= sy; x2 *= sx; y2 *= sy
+        # Aspect ratio filter (relaxed for partial body)
+        h_box = y2 - y1
+        w_box = x2 - x1
+        if h_box / max(w_box, 1.0) < 0.5:
+            continue
+        dets.append(PersonDetection(
+            bbox=(float(x1), float(y1), float(x2), float(y2)),
+            conf=float(conf)))
+    return dets
+
+
+def _merge_nms(dets: List[PersonDetection], conf_thresh: float) -> List[PersonDetection]:
+    """Global NMS across multi-pass detections to remove cross-pass duplicates."""
+    if not dets:
+        return []
+    boxes = [[d.x1, d.y1, d.width, d.height] for d in dets]
+    scores = [d.conf for d in dets]
+    idxs = cv2.dnn.NMSBoxes(boxes, scores,
+                            score_threshold=conf_thresh, nms_threshold=0.45)
+    return [dets[i] for i in (np.array(idxs).flatten() if len(idxs) else [])]
+
+
+# ── PersonDetector ────────────────────────────────────────────────────────────
+
 class PersonDetector:
     """
-    Person-only Detector using YOLO11n.
-    Supports ONNX Runtime (fastest on Edge/CPU) with PyTorch fallback.
+    Person detector supporting both YOLO11n and YOLO26n with 100% parameter parity.
+
+    Model selection via config.ACTIVE_MODEL or model_name:
+      "yolo11" (default) — Anchor-free + NMS
+      "yolo26"           — End-to-end NMS-free with STAL
     """
-    def __init__(self, conf_thresh: float = config.DETECTION_CONF_THRESH, use_onnx: bool = True):
+
+    FAR_REGION_Y_FRAC = 0.55   # Top 55% = where far/small people appear
+
+    def __init__(self, conf_thresh: float = config.DETECTION_CONF_THRESH,
+                 use_onnx: bool = True,
+                 input_size: int = None,
+                 model_name: str = None):
         self.conf_thresh = conf_thresh
-        self.use_onnx = use_onnx
-        self.onnx_session = None
-        self.yolo_model = None
-        
-        onnx_path = config.YOLO_MODEL_PATH
-        if use_onnx and os.path.exists(onnx_path):
+        self.input_size  = input_size or getattr(config, 'YOLO_INPUT_SIZE', 960)
+        self.model_name  = (model_name or getattr(config, 'ACTIVE_MODEL', 'yolo11')).lower()
+        self.session     = None
+        self.yolo_model  = None
+        self.is_yolo26   = (self.model_name == 'yolo26')
+
+        if self.is_yolo26:
+            onnx_path = getattr(config, 'YOLO26_MODEL_PATH', '')
+            pt_path   = getattr(config, 'YOLO26_PT_PATH',    'yolo26n.pt')
+        else:
+            onnx_path = config.YOLO_MODEL_PATH
+            pt_path   = config.YOLO_PT_PATH
+
+        label = 'YOLO26n (NMS-free, STAL)' if self.is_yolo26 else 'YOLO11n'
+
+        if use_onnx and onnx_path and os.path.exists(onnx_path):
             try:
                 import onnxruntime as ort
-                providers = ['CPUExecutionProvider']
-                if 'CUDAExecutionProvider' in ort.get_available_providers():
-                    providers.insert(0, 'CUDAExecutionProvider')
-                self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
-                print(f"[PersonDetector] Loaded ONNX model from {onnx_path}")
+                providers = (['CUDAExecutionProvider', 'CPUExecutionProvider']
+                             if 'CUDAExecutionProvider' in ort.get_available_providers()
+                             else ['CPUExecutionProvider'])
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = 4
+                opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                self.session = ort.InferenceSession(onnx_path, sess_options=opts,
+                                                    providers=providers)
+                _ishape = self.session.get_inputs()[0].shape
+                self._model_native_size = int(_ishape[2]) if isinstance(_ishape[2], int) and int(_ishape[2]) > 0 else None
+                _sz_str = str(self._model_native_size) if self._model_native_size else 'dynamic'
+                print(f"[PersonDetector] {label} ONNX: {onnx_path}  model_size={_sz_str}  requested={self.input_size}")
             except Exception as e:
-                print(f"[PersonDetector] Failed to load ONNX: {e}. Falling back to PyTorch.")
-                self.onnx_session = None
+                print(f'[PersonDetector] ONNX load failed: {e}')
 
-        if self.onnx_session is None:
+        if self.session is None:
             try:
                 from ultralytics import YOLO
-                model_path = config.YOLO_PT_PATH if os.path.exists(config.YOLO_PT_PATH) else "yolo11n.pt"
-                self.yolo_model = YOLO(model_path)
-                print(f"[PersonDetector] Loaded PyTorch YOLO model ({model_path})")
-            except (ImportError, Exception) as e:
-                print(f"[PersonDetector] Ultralytics/PyTorch unavailable ({e}). Using OpenCV Blob/Synthetic fallback detector.")
-                self.yolo_model = None
+                pt = pt_path if os.path.exists(pt_path) else (
+                    'yolo26n.pt' if self.is_yolo26 else 'yolo11n.pt')
+                self.yolo_model = YOLO(pt)
+                print(f'[PersonDetector] {label} PyTorch: {pt}  imgsz={self.input_size}')
+            except Exception as e:
+                print(f'[PersonDetector] No model available: {e}')
 
     def detect(self, frame: np.ndarray) -> List[PersonDetection]:
-        """
-        Runs person detection on a BGR image frame.
-        Returns a list of PersonDetection objects filtered for class 0 (person).
-        """
-        detections: List[PersonDetection] = []
         if frame is None or frame.size == 0:
-            return detections
-
-        if self.onnx_session is not None:
-            detections = self._detect_onnx(frame)
+            return []
+        enhanced = enhance_frame(frame)
+        if self.session is not None:
+            return self._detect_onnx(enhanced)
         elif self.yolo_model is not None:
-            detections = self._detect_pytorch(frame)
+            return self._detect_pytorch(enhanced)
         else:
-            detections = self._detect_fallback(frame)
-
-        return detections
-
-    def _detect_fallback(self, frame: np.ndarray) -> List[PersonDetection]:
-        """
-        Ultra-fast OpenCV Person Detector for live webcam with downscaling & aspect-ratio filtering.
-        """
-        detections = []
-        h_orig, w_orig = frame.shape[:2]
-
-        # Downscale frame to 640x360 for 4x faster CPU processing & zero lag
-        target_w, target_h = 640, 360
-        scale_x = w_orig / target_w
-        scale_y = h_orig / target_h
-        small_frame = cv2.resize(frame, (target_w, target_h))
-
-        raw_boxes = []
-        raw_confs = []
-
-        # 1. Try OpenCV Built-in HOG People Detector on downscaled frame
-        if hasattr(cv2, 'HOGDescriptor'):
-            try:
-                if not hasattr(self, 'hog'):
-                    self.hog = cv2.HOGDescriptor()
-                    self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-                rects, weights = self.hog.detectMultiScale(
-                    small_frame,
-                    winStride=(12, 12),
-                    padding=(8, 8),
-                    scale=1.08,
-                    hitThreshold=0.2
-                )
-                for (x, y, w, h), weight in zip(rects, weights):
-                    conf = float(weight[0]) if isinstance(weight, (list, np.ndarray)) else float(weight)
-                    
-                    # Human Aspect-Ratio Filter: Humans standing/sitting are taller than wide (h/w >= 1.05)
-                    aspect_ratio = h / max(1.0, float(w))
-                    if aspect_ratio >= 1.05 and h >= 40:
-                        raw_boxes.append([int(x * scale_x), int(y * scale_y), int(w * scale_x), int(h * scale_y)])
-                        raw_confs.append(float(max(0.4, min(0.95, conf))))
-            except Exception:
-                pass
-
-        # 2. Try OpenCV Haar Cascade Face/Body Detector if HOG found nothing
-        if len(raw_boxes) == 0 and hasattr(cv2, 'CascadeClassifier') and hasattr(cv2, 'data'):
-            try:
-                if not hasattr(self, 'face_cascade'):
-                    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-                    self.face_cascade = cv2.CascadeClassifier(cascade_path)
-                
-                gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
-                faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
-                for (fx, fy, fw, fh) in faces:
-                    # Extrapolate face ROI to upper-body bounding box on original resolution
-                    bx1 = max(0.0, float((fx - fw * 0.4) * scale_x))
-                    by1 = max(0.0, float((fy - fh * 0.2) * scale_y))
-                    bw = float(fw * 1.8 * scale_x)
-                    bh = float(fh * 3.4 * scale_y)
-                    raw_boxes.append([int(bx1), int(by1), int(bw), int(bh)])
-                    raw_confs.append(0.85)
-            except Exception:
-                pass
-
-        # 3. Apply NMS (Non-Maximum Suppression) to remove duplicate boxes
-        if len(raw_boxes) > 0:
-            boxes_xyxy = []
-            for b in raw_boxes:
-                boxes_xyxy.append([b[0], b[1], b[0] + b[2], b[1] + b[3]])
-
-            indices = cv2.dnn.NMSBoxes(
-                bboxes=raw_boxes,
-                scores=raw_confs,
-                score_threshold=0.3,
-                nms_threshold=0.4
-            )
-            if len(indices) > 0:
-                for idx in np.array(indices).flatten():
-                    b = boxes_xyxy[idx]
-                    detections.append(
-                        PersonDetection(
-                            bbox=(float(b[0]), float(b[1]), float(b[2]), float(b[3])),
-                            conf=raw_confs[idx],
-                            class_id=config.PERSON_CLASS_ID
-                        )
-                    )
-
-        # 4. Synthetic color mask fallback if no persons detected
-        if len(detections) == 0:
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            mask1 = cv2.inRange(hsv, (0, 100, 100), (25, 255, 255))
-            mask2 = cv2.inRange(hsv, (140, 100, 100), (170, 255, 255))
-            mask = cv2.bitwise_or(mask1, mask2)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for c in contours:
-                x, y, w, h = cv2.boundingRect(c)
-                if w >= 20 and h >= 40:
-                    detections.append(
-                        PersonDetection(
-                            bbox=(float(x), float(y), float(x + w), float(y + h)),
-                            conf=0.92,
-                            class_id=config.PERSON_CLASS_ID
-                        )
-                    )
-
-        return detections
-
-    def _detect_pytorch(self, frame: np.ndarray) -> List[PersonDetection]:
-        """Inference using Ultralytics PyTorch pipeline."""
-        results = self.yolo_model.predict(
-            source=frame,
-            classes=[config.PERSON_CLASS_ID],  # Filter only person class (class 0)
-            conf=config.LOW_CONF_THRESH,       # Include low conf for ByteTrack 2nd stage association
-            verbose=False
-        )
-        
-        detections = []
-        if len(results) > 0 and results[0].boxes is not None:
-            boxes = results[0].boxes
-            for i in range(len(boxes)):
-                xyxy = boxes.xyxy[i].cpu().numpy()
-                conf = float(boxes.conf[i].cpu().numpy())
-                cls_id = int(boxes.cls[i].cpu().numpy())
-                
-                if cls_id == config.PERSON_CLASS_ID:
-                    detections.append(
-                        PersonDetection(
-                            bbox=(float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])),
-                            conf=conf,
-                            class_id=cls_id
-                        )
-                    )
-        return detections
+            return self._detect_hog(enhanced)
 
     def _detect_onnx(self, frame: np.ndarray) -> List[PersonDetection]:
-        """Inference using ONNX Runtime for maximum efficiency."""
-        img_h, img_w = frame.shape[:2]
-        
-        # Preprocessing: Resize & normalize for YOLO input (640x640)
-        img_input = cv2.resize(frame, (640, 640))
-        img_input = cv2.cvtColor(img_input, cv2.COLOR_BGR2RGB)
-        img_input = img_input.astype(np.float32) / 255.0
-        img_input = np.transpose(img_input, (2, 0, 1))[None, ...]  # (1, 3, 640, 640)
+        H = frame.shape[0]
+        conf_t = self.conf_thresh
+        low_t  = config.LOW_CONF_THRESH
+        native = getattr(self, '_model_native_size', None)
+        main_sz = native if native else self.input_size
+        far_sz  = min(main_sz, 640)
+        far_y2  = int(H * self.FAR_REGION_Y_FRAC)
+        far_crop = frame[:far_y2, :]
 
-        input_name = self.onnx_session.get_inputs()[0].name
-        outputs = self.onnx_session.run(None, {input_name: img_input})
-        
-        # YOLOv8/v11 ONNX output shape: (1, 84, 8400)
-        predictions = np.squeeze(outputs[0])  # (84, 8400)
-        
-        # Extract boxes, scores, and class IDs
-        # First 4 rows: [cx, cy, w, h], next rows: class confidences
-        boxes = predictions[:4, :].T  # (8400, 4)
-        scores = predictions[4 + config.PERSON_CLASS_ID, :].T  # (8400,)
-        
-        # Filter by confidence
-        mask = scores >= config.LOW_CONF_THRESH
-        boxes = boxes[mask]
-        scores = scores[mask]
+        if self.is_yolo26:
+            # Pass 1: Full frame (extract down to low_t for ByteTrack)
+            dets1 = _onnx_infer_yolo26(self.session, frame, main_sz, low_t, conf_t)
+            # Pass 2: Far region crop
+            dets2_r = _onnx_infer_yolo26(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
+            dets2 = [PersonDetection(bbox=(d.x1, d.y1, d.x2, d.y2),
+                                     conf=d.conf * 0.90) for d in dets2_r]
+        else:
+            # Pass 1: Full frame (extract down to low_t for ByteTrack)
+            dets1 = _onnx_infer_yolo11(self.session, frame, main_sz, low_t, conf_t)
+            # Pass 2: Far region crop
+            dets2_r = _onnx_infer_yolo11(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
+            dets2 = [PersonDetection(bbox=(d.x1, d.y1, d.x2, d.y2),
+                                     conf=d.conf * 0.90) for d in dets2_r]
 
-        if len(boxes) == 0:
-            return []
+        # Merge both passes keeping all valid candidates down to low_t
+        return _merge_nms(dets1 + dets2, low_t)
 
-        # Convert [cx, cy, w, h] to [x1, y1, w, h] & scale to original resolution
-        x_factor = img_w / 640.0
-        y_factor = img_h / 640.0
+    def _detect_pytorch(self, frame: np.ndarray) -> List[PersonDetection]:
+        results = self.yolo_model.predict(
+            source=frame, classes=[config.PERSON_CLASS_ID],
+            conf=config.LOW_CONF_THRESH, imgsz=self.input_size, verbose=False)
+        dets = []
+        if results and results[0].boxes is not None:
+            for box in results[0].boxes:
+                xy, c = box.xyxy[0].cpu().numpy(), float(box.conf[0])
+                if int(box.cls[0]) == config.PERSON_CLASS_ID and c >= config.LOW_CONF_THRESH:
+                    dets.append(PersonDetection(
+                        bbox=(float(xy[0]), float(xy[1]), float(xy[2]), float(xy[3])),
+                        conf=c))
+        return dets
 
-        cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-        x1 = (cx - w / 2.0) * x_factor
-        y1 = (cy - h / 2.0) * y_factor
-        w_scaled = w * x_factor
-        h_scaled = h * y_factor
-
-        boxes_tlwh = np.column_stack([x1, y1, w_scaled, h_scaled]).tolist()
-        scores_list = scores.tolist()
-        
-        # OpenCV NMS requires [x, y, w, h]
-        indices = cv2.dnn.NMSBoxes(
-            bboxes=boxes_tlwh,
-            scores=scores_list,
-            score_threshold=config.DETECTION_CONF_THRESH,
-            nms_threshold=0.45
-        )
-
-        detections = []
-        if len(indices) > 0:
-            indices = np.array(indices).flatten()
-            for idx in indices:
-                bx = boxes_tlwh[idx]
-                conf = float(scores_list[idx])
-                x1_b, y1_b, w_b, h_b = bx
-                detections.append(
-                    PersonDetection(
-                        bbox=(float(x1_b), float(y1_b), float(x1_b + w_b), float(y1_b + h_b)),
-                        conf=conf,
-                        class_id=config.PERSON_CLASS_ID
-                    )
-                )
-        return detections
+    def _detect_hog(self, frame: np.ndarray) -> List[PersonDetection]:
+        if not hasattr(self, '_hog'):
+            self._hog = cv2.HOGDescriptor()
+            self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        small = cv2.resize(frame, (640, 360))
+        sx, sy = frame.shape[1] / 640, frame.shape[0] / 360
+        rects, ws = self._hog.detectMultiScale(
+            small, winStride=(8, 8), padding=(8, 8), scale=1.05)
+        dets = []
+        for (x, y, w, h), wt in zip(rects, ws):
+            c = float(wt[0] if hasattr(wt, '__len__') else wt)
+            if h / max(w, 1) >= 0.8 and h >= 30:
+                dets.append(PersonDetection(
+                    bbox=(x * sx, y * sy, (x + w) * sx, (y + h) * sy),
+                    conf=min(0.90, max(0.40, c))))
+        return dets

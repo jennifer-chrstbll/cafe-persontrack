@@ -1,0 +1,18 @@
+# Video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Processed results directory
+results/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Model weights (large files)
+weights/*.pt
+weights/*.onnx
+weights/*.engine

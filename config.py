@@ -11,17 +11,17 @@ OSNET_MODEL_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25.onnx")
 OSNET_PT_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25_msmt17.pth")
 
 # Detection Parameters
-DETECTION_CONF_THRESH = 0.35
+DETECTION_CONF_THRESH = 0.18
 PERSON_CLASS_ID = 0  # YOLO class 0 is 'person'
 
 # ByteTrack Parameters
-TRACK_THRESH = 0.4         # Threshold for high-confidence detections
-TRACK_BUFFER = 90          # Frames to keep lost tracks before removing (3 seconds)
-MATCH_THRESH = 0.85        # Maximum IoU distance for first association
-LOW_CONF_THRESH = 0.1      # Threshold for low-confidence detections
+TRACK_THRESH = 0.25         # Threshold for high-confidence detections
+TRACK_BUFFER = 250          # Frames to keep lost tracks before removing (3 seconds)
+MATCH_THRESH = 0.60        # Maximum IoU distance for first association
+LOW_CONF_THRESH = 0.05      # Threshold for low-confidence detections
 
 # ReID Parameters
-REID_SIMILARITY_THRESH = 0.65  # Cosine similarity threshold tau_reid
+REID_SIMILARITY_THRESH = 0.50  # Cosine similarity threshold tau_reid
 REID_FEATURE_DIM = 512
 REID_IMAGE_SIZE = (128, 256)   # (width, height) for OSNet input
 
@@ -76,3 +76,19 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 # Sync interval — how often (seconds) to push occupancy count to Supabase
 SYNC_INTERVAL_SEC = 1.0
+
+BACKEND_API_URL = 'http://localhost:8001/api/v1'
+
+# Fused IoU + ReID cost weight (0=pure IoU, 1=pure ReID)
+REID_COST_WEIGHT = 0.40
+
+# YOLO inference input size. Larger = better for small/far people.
+# 1280 recommended for laptop. 640 for Raspberry Pi 5 (use --skip 3).
+YOLO_INPUT_SIZE = 1280
+
+# YOLO26 Model Paths (new, edge-optimized, NMS-free)
+YOLO26_MODEL_PATH = os.path.join(BASE_DIR, "weights", "yolo26n.onnx")
+YOLO26_PT_PATH    = os.path.join(BASE_DIR, "weights", "yolo26n.pt")
+
+# Active model selector: "yolo11" or "yolo26"
+ACTIVE_MODEL = "yolo11"  # Switch to "yolo11" to revert
