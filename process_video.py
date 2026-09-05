@@ -16,10 +16,10 @@ import config
 _CONF         = 0.18
 _LOW_CONF     = 0.05
 _TRACK_THRESH = 0.25
-_TRACK_BUFFER = 250
-_MATCH_THRESH = 0.60
-_REID_THRESH  = 0.50
-_REID_WEIGHT  = 0.35
+_TRACK_BUFFER = 150   # was 250 — reduced to prevent ghost tracks from persisting too long
+_MATCH_THRESH = 0.65  # was 0.60 — tighter gate for fused cost
+_REID_THRESH  = 0.62  # was 0.50 — stricter reconnect threshold for OSNet x0.25
+_REID_WEIGHT  = 0.55  # was 0.35 — raise appearance weight to fix ID-swap-on-crossing
 _MIN_HITS     = 3
 
 

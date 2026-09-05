@@ -36,7 +36,7 @@ def enhance_frame(frame: np.ndarray) -> np.ndarray:
     l, a, b = cv2.split(lab)
     l_eq = _clahe.apply(l)
     blur = cv2.GaussianBlur(l_eq, (0, 0), sigmaX=3)
-    l_sh = np.clip(cv2.addWeighted(l_eq, 1.5, blur, -0.5, 0), 0, 255).astype(np.uint8)
+    l_sh = cv2.addWeighted(l_eq, 1.5, blur, -0.5, 0)  # uint8 input -> saturates automatically, no np.clip needed
     return cv2.cvtColor(cv2.merge([l_sh, a, b]), cv2.COLOR_LAB2BGR)
 
 
@@ -45,7 +45,7 @@ def enhance_frame(frame: np.ndarray) -> np.ndarray:
 def _onnx_infer_yolo11(session, frame: np.ndarray,
                        input_size: int,
                        low_thresh: float,
-                       conf_thresh: float) -> List[PersonDetection]:
+                       conf_thresh: float) -> List[PersonDetection]:  # NOTE: conf_thresh kept for API compatibility but filtering uses low_thresh; ByteTrack handles high/low split internally
     """
     YOLO11 ONNX inference — standard NMS output format.
     Output shape: (1, 84, 8400)
@@ -95,7 +95,7 @@ def _onnx_infer_yolo11(session, frame: np.ndarray,
 def _onnx_infer_yolo26(session, frame: np.ndarray,
                        input_size: int,
                        low_thresh: float,
-                       conf_thresh: float) -> List[PersonDetection]:
+                       conf_thresh: float) -> List[PersonDetection]:  # NOTE: conf_thresh kept for API compatibility; ByteTrack high/low split is done by TRACK_THRESH, not here
     """
     YOLO26 ONNX inference — NMS-free end-to-end output format.
     Output shape: (1, 300, 6) where 6 = [x1, y1, x2, y2, conf, class_id]
@@ -132,13 +132,19 @@ def _onnx_infer_yolo26(session, frame: np.ndarray,
 
 
 def _merge_nms(dets: List[PersonDetection], conf_thresh: float) -> List[PersonDetection]:
-    """Global NMS across multi-pass detections to remove cross-pass duplicates."""
+    """Global NMS across multi-pass detections to remove cross-pass duplicates.
+
+    nms_threshold=0.55 (raised from 0.45) — cross-pass boxes for the same person
+    may overlap less than same-pass boxes because Pass 2 crops a sub-region and
+    rescales differently. A higher threshold ensures we still merge them as
+    duplicates even when IoU drops to ~0.50.
+    """
     if not dets:
         return []
     boxes = [[d.x1, d.y1, d.width, d.height] for d in dets]
     scores = [d.conf for d in dets]
     idxs = cv2.dnn.NMSBoxes(boxes, scores,
-                            score_threshold=conf_thresh, nms_threshold=0.45)
+                            score_threshold=conf_thresh, nms_threshold=0.55)
     return [dets[i] for i in (np.array(idxs).flatten() if len(idxs) else [])]
 
 
@@ -220,26 +226,31 @@ class PersonDetector:
         low_t  = config.LOW_CONF_THRESH
         native = getattr(self, '_model_native_size', None)
         main_sz = native if native else self.input_size
-        far_sz  = min(main_sz, 640)
+        # FIX: far_sz must equal main_sz — NOT be capped at 640.
+        # The far/top region contains physically smaller people; we need the same
+        # pixel density as the full-frame pass, otherwise we'd be downsampling
+        # the very crop that already has fewer pixels-per-person. min(...,640)
+        # was doing the opposite of what the 2-pass strategy intends.
+        far_sz  = main_sz
         far_y2  = int(H * self.FAR_REGION_Y_FRAC)
         far_crop = frame[:far_y2, :]
 
         if self.is_yolo26:
             # Pass 1: Full frame (extract down to low_t for ByteTrack)
             dets1 = _onnx_infer_yolo26(self.session, frame, main_sz, low_t, conf_t)
-            # Pass 2: Far region crop
+            # Pass 2: Far region crop — same resolution, lower conf gate
             dets2_r = _onnx_infer_yolo26(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
             dets2 = [PersonDetection(bbox=(d.x1, d.y1, d.x2, d.y2),
                                      conf=d.conf * 0.90) for d in dets2_r]
         else:
             # Pass 1: Full frame (extract down to low_t for ByteTrack)
             dets1 = _onnx_infer_yolo11(self.session, frame, main_sz, low_t, conf_t)
-            # Pass 2: Far region crop
+            # Pass 2: Far region crop — same resolution, lower conf gate
             dets2_r = _onnx_infer_yolo11(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
             dets2 = [PersonDetection(bbox=(d.x1, d.y1, d.x2, d.y2),
                                      conf=d.conf * 0.90) for d in dets2_r]
 
-        # Merge both passes keeping all valid candidates down to low_t
+        # Merge both passes; nms_threshold=0.55 handles cross-pass box offset
         return _merge_nms(dets1 + dets2, low_t)
 
     def _detect_pytorch(self, frame: np.ndarray) -> List[PersonDetection]:

@@ -126,10 +126,15 @@ from models.reid import OSNetExtractor
 class ByteTracker:
     """
     ByteTracker with fused IoU+ReID cost + lazy ReID updates + thread-safe unique IDs.
+
+    Appearance memory stores up to GALLERY_SIZE embeddings per track (FIFO) so that
+    similarity is computed as MAX over all stored samples. This makes re-identification
+    robust to 180° body rotation and varying viewpoints.
     """
 
-    REID_UPDATE_INTERVAL = 10
+    REID_UPDATE_INTERVAL = 5   # frames between lazy ReID refreshes (was 10 — halved for faster pose adaptation)
     REID_MAX_AGE_SEC = 8.0
+    GALLERY_SIZE = 5           # number of appearance samples stored per track
 
     def __init__(self, camera_id: str = 'CAM_1', fps: float = 25.0):
         self.camera_id = camera_id
@@ -140,7 +145,9 @@ class ByteTracker:
         self.frame_id = 0
         self.kalman_filter = KalmanFilter()
         self.reid_extractor = OSNetExtractor()
-        self.appearance_memory: Dict[int, np.ndarray] = {}
+        # appearance_memory: Dict[track_id, List[np.ndarray]]
+        # Each track keeps up to GALLERY_SIZE L2-normalized embedding samples (FIFO).
+        self.appearance_memory: Dict[int, list] = {}
 
     def _extract(self, frame: np.ndarray, tlbr: np.ndarray) -> Optional[np.ndarray]:
         feat = self.reid_extractor.extract_feature(frame, tlbr)
@@ -150,14 +157,46 @@ class ByteTracker:
                 frame, np.array([x1, y1, x2, y1 + (y2 - y1) * 0.6]))
         return feat
 
-    def _update_memory(self, tid: int, feat: np.ndarray, alpha: float = 0.70):
-        old = self.appearance_memory.get(tid)
-        merged = alpha * old + (1 - alpha) * feat if old is not None else feat.copy()
-        norm = float(np.linalg.norm(merged))
-        self.appearance_memory[tid] = merged / max(norm, 1e-6)
+    def _update_memory(self, tid: int, feat: np.ndarray):
+        """Append feat to the per-track gallery (FIFO, max GALLERY_SIZE samples).
+
+        Using a gallery of samples instead of a single EMA vector means:
+        - When a person turns 180°, the new back-view embedding is added to the
+          gallery alongside the old front-view embedding.
+        - Similarity is computed as MAX over all gallery samples (see _gallery_sim),
+          so a match to ANY stored view counts as a hit.
+        """
+        norm = float(np.linalg.norm(feat))
+        if norm < 1e-6:
+            return
+        feat_n = feat / norm
+        gallery = self.appearance_memory.get(tid)
+        if gallery is None:
+            self.appearance_memory[tid] = [feat_n]
+        else:
+            gallery.append(feat_n)
+            if len(gallery) > self.GALLERY_SIZE:
+                gallery.pop(0)  # evict oldest
+
+    def _gallery_sim(self, tid: int, feat_n: np.ndarray) -> float:
+        """Max cosine similarity between feat_n and any sample in the gallery for tid."""
+        gallery = self.appearance_memory.get(tid)
+        if not gallery:
+            return 0.0
+        return float(max(np.dot(feat_n, s) for s in gallery))
 
     def _get_track_feats(self, tracks: List[STrack]) -> Optional[np.ndarray]:
-        feats = [self.appearance_memory.get(t.track_id) for t in tracks]
+        """Return representative embedding per track (mean of gallery samples)."""
+        feats = []
+        for t in tracks:
+            gallery = self.appearance_memory.get(t.track_id)
+            if gallery:
+                # Mean of gallery samples as representative vector
+                mean_feat = np.mean(gallery, axis=0).astype(np.float32)
+                norm = float(np.linalg.norm(mean_feat))
+                feats.append(mean_feat / max(norm, 1e-6))
+            else:
+                feats.append(None)
         if all(f is None for f in feats):
             return None
         dim = next(f.shape[0] for f in feats if f is not None)
@@ -222,6 +261,7 @@ class ByteTracker:
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
+            # Update gallery for ALL matched tracks (Tracked + re-activated)
             if det.reid_feature is not None:
                 self._update_memory(track.track_id, det.reid_feature)
 
@@ -272,10 +312,7 @@ class ByteTracker:
                 nf = det.reid_feature / max(float(np.linalg.norm(det.reid_feature)), 1e-6)
                 best_sim, best_lost = 0.0, None
                 for lt in recent_lost:
-                    cached = self.appearance_memory.get(lt.track_id)
-                    if cached is None:
-                        continue
-                    sim = float(np.dot(nf, cached))
+                    sim = self._gallery_sim(lt.track_id, nf)
                     if sim >= reid_thresh and sim > best_sim:
                         best_sim, best_lost = sim, lt
 
@@ -287,14 +324,26 @@ class ByteTracker:
                     if best_lost in recent_lost:
                         recent_lost.remove(best_lost)
 
-            # Spatial proximity fallback
+            # Spatial proximity fallback — only if no ReID match found.
+            # FIX: Radius shrunk from 180px to 80px (scaled by frame width).
+            # FIX: Require minimum ReID similarity >= 0.30 as guard — prevents
+            # identity swaps in crowded areas where two different people happen
+            # to be close to each other. Pure-distance fallback caused the
+            # "berbalik badan dianggap orang lain" bug in busy scenes.
             if not reconnected and frame is not None:
                 frame_w = frame.shape[1]
-                prox = 180.0 * (frame_w / 1280.0)
+                prox = 80.0 * (frame_w / 1280.0)  # was 180.0 — too permissive
+                fallback_reid_min = 0.30  # loose but non-zero appearance guard
                 dcx, dcy = det.centroid
                 for lt in recent_lost:
                     lcx, lcy = lt.centroid
                     if np.hypot(dcx - lcx, dcy - lcy) <= prox:
+                        # Check minimum appearance similarity before committing
+                        if det.reid_feature is not None:
+                            nf_fb = det.reid_feature / max(float(np.linalg.norm(det.reid_feature)), 1e-6)
+                            fb_sim = self._gallery_sim(lt.track_id, nf_fb)
+                            if fb_sim < fallback_reid_min:
+                                continue  # appearance too different — skip this lost track
                         lt.re_activate(det, self.frame_id, new_id=False)
                         refind_stracks.append(lt)
                         reconnected = True

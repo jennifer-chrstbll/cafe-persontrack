@@ -16,12 +16,19 @@ PERSON_CLASS_ID = 0  # YOLO class 0 is 'person'
 
 # ByteTrack Parameters
 TRACK_THRESH = 0.25         # Threshold for high-confidence detections
-TRACK_BUFFER = 250          # Frames to keep lost tracks before removing (3 seconds)
-MATCH_THRESH = 0.60        # Maximum IoU distance for first association
+TRACK_BUFFER = 150          # Frames to keep lost tracks before removing.
+                             # At 13fps = ~11.5s. Was 250 (~19s) which kept
+                             # ghost tracks alive too long -> wrong reconnections.
+MATCH_THRESH = 0.65         # Maximum fused cost for primary association. Was 0.60.
+                             # Slightly tighter gate reduces wrong matches when
+                             # people are at similar positions.
 LOW_CONF_THRESH = 0.05      # Threshold for low-confidence detections
 
 # ReID Parameters
-REID_SIMILARITY_THRESH = 0.50  # Cosine similarity threshold tau_reid
+REID_SIMILARITY_THRESH = 0.62  # Cosine similarity threshold for lost-track reconnection.
+                                # Was 0.50 — too permissive for OSNet x0.25 which can
+                                # return sim>0.50 for visually different people.
+                                # 0.62 requires stronger appearance match to reconnect.
 REID_FEATURE_DIM = 512
 REID_IMAGE_SIZE = (128, 256)   # (width, height) for OSNet input
 
@@ -80,7 +87,10 @@ SYNC_INTERVAL_SEC = 1.0
 BACKEND_API_URL = 'http://localhost:8001/api/v1'
 
 # Fused IoU + ReID cost weight (0=pure IoU, 1=pure ReID)
-REID_COST_WEIGHT = 0.40
+# Was 0.40. Raised to 0.55 so appearance signal (clothes color, texture)
+# dominates over position in ambiguous crossing/occlusion situations.
+# This directly fixes the "baju jelas beda tapi ID swap" problem.
+REID_COST_WEIGHT = 0.55
 
 # YOLO inference input size. Larger = better for small/far people.
 # 1280 recommended for laptop. 640 for Raspberry Pi 5 (use --skip 3).

@@ -112,6 +112,10 @@ def _camera_worker(
     frame_count = 0
     last_sync = 0.0
     last_active_tracks = []
+    # Streak debounce — same MIN_HITS logic as process_video.py & pipeline.py
+    _MIN_HITS = 3
+    _streaks: Dict[int, int] = {}
+    _confirmed: set = set()
 
     while _running:
         ret, frame = cap.read()
@@ -138,17 +142,28 @@ def _camera_worker(
             frame=frame
         )
 
-        last_active_tracks = global_tracks
+        # ── Step 4: Streak debounce — stabilize occupancy count ──
+        seen = {t.track_id for t in global_tracks}
+        for tid in seen:
+            _streaks[tid] = _streaks.get(tid, 0) + 1
+            if _streaks[tid] >= _MIN_HITS:
+                _confirmed.add(tid)
+        for tid in list(_streaks):
+            if tid not in seen:
+                _streaks[tid] = 0
+        _confirmed.intersection_update(seen | {tid for tid, s in _streaks.items() if s > 0})
+
+        last_active_tracks = [t for t in global_tracks if t.track_id in _confirmed]
         elapsed_ms = (time.time() - t0) * 1000
 
-        # ── Step 4: Non-blocking Supabase Occupancy Push ──
+        # ── Step 5: Non-blocking Supabase Occupancy Push (debounced count) ──
         now = time.time()
         if (now - last_sync) >= config.SYNC_INTERVAL_SEC:
             last_sync = now
-            count = len(last_active_tracks)
+            count = len(last_active_tracks)  # confirmed (debounced) count
             push_occupancy_background(camera_id, floor, count)
             logger.info(
-                f"[{camera_id}] Floor {floor} | {count} people | "
+                f"[{camera_id}] Floor {floor} | {count} confirmed people | "
                 f"Detection: {elapsed_ms:.1f}ms"
             )
 

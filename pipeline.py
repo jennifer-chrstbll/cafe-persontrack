@@ -28,16 +28,27 @@ class MultiCamPipeline:
 
         self.last_sync_time: Dict[str, float] = {cam_id: 0.0 for cam_id in camera_ids}
 
+        # Streak debounce — mirrors MIN_HITS logic from process_video.py.
+        # A track is only counted as "confirmed" after being seen for MIN_HITS
+        # consecutive processed frames. This prevents occupancy from fluctuating
+        # on every single missed detection (motion blur, brief occlusion).
+        self._MIN_HITS = 3
+        self._streaks: Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
+        self._confirmed: Dict[str, set] = {cam_id: set() for cam_id in camera_ids}
+
     def process_frame(self, camera_id: str, frame: np.ndarray) -> List[STrack]:
         """
         Processes a single camera frame:
         1. Runs YOLO11n person detection (class 0 only).
         2. Updates single-camera ByteTrack tracker.
         3. Applies Multi-Camera Global ID mapping & Lazy ReID association.
-        4. Telemetry push to backend every SYNC_INTERVAL_SEC.
+        4. Updates streak debounce (MIN_HITS=3) to stabilize occupancy count.
+        5. Telemetry push to backend every SYNC_INTERVAL_SEC.
         """
         if camera_id not in self.trackers:
             self.trackers[camera_id] = ByteTracker(camera_id=camera_id)
+            self._streaks[camera_id] = {}
+            self._confirmed[camera_id] = set()
 
         # Step 1: Detect Persons
         detections = self.detector.detect(frame)
@@ -53,7 +64,23 @@ class MultiCamPipeline:
             frame=frame
         )
 
-        # Step 4: Background Sync to CRM Backend
+        # Step 4: Streak debounce — count only tracks confirmed for MIN_HITS frames
+        streaks = self._streaks[camera_id]
+        confirmed = self._confirmed[camera_id]
+        seen = {t.track_id for t in global_tracks}
+        for tid in seen:
+            streaks[tid] = streaks.get(tid, 0) + 1
+            if streaks[tid] >= self._MIN_HITS:
+                confirmed.add(tid)
+        for tid in list(streaks):
+            if tid not in seen:
+                streaks[tid] = 0  # reset streak on miss; remove from confirmed next cycle
+        # Tracks whose streak reset are removed from confirmed set
+        confirmed.intersection_update(seen | {tid for tid, s in streaks.items() if s > 0})
+
+        confirmed_tracks = [t for t in global_tracks if t.track_id in confirmed]
+
+        # Step 5: Background Sync to CRM Backend
         now = time.time()
         if (now - self.last_sync_time.get(camera_id, 0.0)) >= config.SYNC_INTERVAL_SEC:
             self.last_sync_time[camera_id] = now
@@ -70,11 +97,11 @@ class MultiCamPipeline:
                     "velocity_y": round(track.velocity_y, 2),
                     "status": "ACTIVE"
                 }
-                for track in global_tracks
+                for track in confirmed_tracks
             ]
             sync_telemetry_background(self.backend_client, camera_id, floor, tracks_payload)
 
-        return global_tracks
+        return confirmed_tracks
 
     def draw_tracks(
         self,
@@ -122,6 +149,7 @@ class MultiCamPipeline:
 
         # 3. Draw Header Stats Badge
         h, w = annotated_frame.shape[:2]
+        # len(tracks) here is already the debounced confirmed count (from process_frame)
         info_text = f"Cam: {camera_id} | Occupancy: {len(tracks)} | FPS: {fps:.1f}"
         cv2.rectangle(annotated_frame, (0, 0), (w, 35), (20, 20, 20), -1)
         cv2.putText(annotated_frame, info_text, (15, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
