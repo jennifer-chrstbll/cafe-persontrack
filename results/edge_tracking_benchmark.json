@@ -1,22 +1,22 @@
 {
   "benchmark_environment": "win32",
-  "detector_model": "yolo11",
-  "detection_avg_ms": 633.58,
-  "detection_std_ms": 41.85,
-  "bytetrack_avg_ms": 91.47,
-  "osnet_reid_crop_ms": 150.2,
+  "detector_model": "yolo26",
+  "detection_avg_ms": 118.23,
+  "detection_std_ms": 42.36,
+  "bytetrack_avg_ms": 1.21,
+  "osnet_reid_crop_ms": 239.95,
   "workload_performance": {
     "1_people": {
-      "total_frame_ms": 755.09,
-      "estimated_fps": 1.3
+      "total_frame_ms": 167.43,
+      "estimated_fps": 6.0
     },
     "3_people": {
-      "total_frame_ms": 815.17,
-      "estimated_fps": 1.2
+      "total_frame_ms": 263.41,
+      "estimated_fps": 3.8
     },
     "5_people": {
-      "total_frame_ms": 875.25,
-      "estimated_fps": 1.1
+      "total_frame_ms": 359.38,
+      "estimated_fps": 2.8
     }
   },
   "target_fps_threshold": 8.0,

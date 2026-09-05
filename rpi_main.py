@@ -131,35 +131,40 @@ def _camera_worker(
         frame_count += 1
         t0 = time.time()
 
-        # ── Step 1: Person Detection (YOLO11n ONNX) ──
-        detections = detector.detect(frame)
+        try:
+            # ── Step 1: Person Detection (YOLO11n / YOLO26n ONNX) ──
+            detections = detector.detect(frame)
 
-        # ── Step 2: ByteTrack Single-Camera Tracking ──
-        local_tracks = tracker.update(detections, frame=frame)
+            # ── Step 2: ByteTrack Single-Camera Tracking ──
+            local_tracks = tracker.update(detections, frame=frame)
 
-        # ── Step 3: Multi-Camera Global ID + Lazy ReID ──
-        global_tracks = multicam_manager.process_camera_tracks(
-            camera_id=camera_id,
-            tracks=local_tracks,
-            frame=frame
-        )
+            # ── Step 3: Multi-Camera Global ID + Lazy ReID ──
+            global_tracks = multicam_manager.process_camera_tracks(
+                camera_id=camera_id,
+                tracks=local_tracks,
+                frame=frame
+            )
 
-        # ── Step 4: Streak debounce with grace period (ADD=3 frames, REMOVE=5 misses) ──
-        seen = {t.track_id for t in global_tracks}
-        for tid in seen:
-            _streaks[tid] = _streaks.get(tid, 0) + 1
-            _misses[tid]  = 0
-            if _streaks[tid] >= _MIN_HITS:
-                _confirmed.add(tid)
-        for tid in list(_streaks):
-            if tid not in seen:
-                _misses[tid] = _misses.get(tid, 0) + 1
-                if _misses[tid] >= _MISS_GRACE:
-                    _confirmed.discard(tid)
-                    _streaks.pop(tid, None)
-                    _misses.pop(tid, None)
+            # ── Step 4: Streak debounce with grace period (ADD=3 frames, REMOVE=5 misses) ──
+            seen = {t.track_id for t in global_tracks}
+            for tid in seen:
+                _streaks[tid] = _streaks.get(tid, 0) + 1
+                _misses[tid]  = 0
+                if _streaks[tid] >= _MIN_HITS:
+                    _confirmed.add(tid)
+            for tid in list(_streaks):
+                if tid not in seen:
+                    _misses[tid] = _misses.get(tid, 0) + 1
+                    if _misses[tid] >= _MISS_GRACE:
+                        _confirmed.discard(tid)
+                        _streaks.pop(tid, None)
+                        _misses.pop(tid, None)
 
-        last_active_tracks = [t for t in global_tracks if t.track_id in _confirmed]
+            last_active_tracks = [t for t in global_tracks if t.track_id in _confirmed]
+        except Exception as e:
+            logger.error(f"[{camera_id}] Error in frame {frame_count} processing: {e}", exc_info=True)
+            continue
+
         elapsed_ms = (time.time() - t0) * 1000
 
         # ── Step 5: Non-blocking Supabase Occupancy Push (debounced count) ──

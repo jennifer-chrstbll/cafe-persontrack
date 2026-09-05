@@ -75,7 +75,7 @@ def benchmark_tracking_pipeline(num_frames: int = 50):
     track_times = []
     for _ in range(num_frames):
         t_start = time.time()
-        active = tracker.update(sim_dets, frame=sample_frame)
+        active = tracker.update(sim_dets)  # Pure ByteTrack Kalman + IoU matching
         track_times.append((time.time() - t_start) * 1000.0)
 
     avg_track_ms = float(np.mean(track_times))

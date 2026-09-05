@@ -199,7 +199,29 @@ class PersonDetector:
             except Exception as e:
                 print(f'[PersonDetector] ONNX load failed: {e}')
 
-        if self.session is None:
+        if self.session is None and self.yolo_model is None and self.is_yolo26:
+            print("[PersonDetector] YOLO26 unavailable, attempting fallback to YOLO11...")
+            self.is_yolo26 = False
+            self.model_name = 'yolo11'
+            onnx_path = config.YOLO_MODEL_PATH
+            pt_path   = config.YOLO_PT_PATH
+            if use_onnx and onnx_path and os.path.exists(onnx_path):
+                try:
+                    import onnxruntime as ort
+                    providers = (['CUDAExecutionProvider', 'CPUExecutionProvider']
+                                 if 'CUDAExecutionProvider' in ort.get_available_providers()
+                                 else ['CPUExecutionProvider'])
+                    opts = ort.SessionOptions()
+                    opts.intra_op_num_threads = 4
+                    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    self.session = ort.InferenceSession(onnx_path, sess_options=opts, providers=providers)
+                    _ishape = self.session.get_inputs()[0].shape
+                    self._model_native_size = int(_ishape[2]) if isinstance(_ishape[2], int) and int(_ishape[2]) > 0 else None
+                    print(f"[PersonDetector] Fallback to YOLO11n ONNX: {onnx_path}")
+                except Exception as e:
+                    print(f'[PersonDetector] Fallback ONNX load failed: {e}')
+
+        if self.session is None and self.yolo_model is None:
             try:
                 from ultralytics import YOLO
                 pt = pt_path if os.path.exists(pt_path) else (
@@ -226,32 +248,26 @@ class PersonDetector:
         low_t  = config.LOW_CONF_THRESH
         native = getattr(self, '_model_native_size', None)
         main_sz = native if native else self.input_size
-        # FIX: far_sz must equal main_sz — NOT be capped at 640.
-        # The far/top region contains physically smaller people; we need the same
-        # pixel density as the full-frame pass, otherwise we'd be downsampling
-        # the very crop that already has fewer pixels-per-person. min(...,640)
-        # was doing the opposite of what the 2-pass strategy intends.
-        far_sz  = main_sz
-        far_y2  = int(H * self.FAR_REGION_Y_FRAC)
-        far_crop = frame[:far_y2, :]
 
         if self.is_yolo26:
-            # Pass 1: Full frame (extract down to low_t for ByteTrack)
             dets1 = _onnx_infer_yolo26(self.session, frame, main_sz, low_t, conf_t)
-            # Pass 2: Far region crop — same resolution, lower conf gate
-            dets2_r = _onnx_infer_yolo26(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
-            dets2 = [PersonDetection(bbox=(d.x1, d.y1, d.x2, d.y2),
-                                     conf=d.conf * 0.90) for d in dets2_r]
         else:
-            # Pass 1: Full frame (extract down to low_t for ByteTrack)
             dets1 = _onnx_infer_yolo11(self.session, frame, main_sz, low_t, conf_t)
-            # Pass 2: Far region crop — same resolution, lower conf gate
-            dets2_r = _onnx_infer_yolo11(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
+
+        enable_far_pass = getattr(config, 'ENABLE_FAR_REGION_PASS', False)
+        if enable_far_pass:
+            far_sz  = main_sz
+            far_y2  = int(H * self.FAR_REGION_Y_FRAC)
+            far_crop = frame[:far_y2, :]
+            if self.is_yolo26:
+                dets2_r = _onnx_infer_yolo26(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
+            else:
+                dets2_r = _onnx_infer_yolo11(self.session, far_crop, far_sz, low_t * 0.85, conf_t * 0.85)
             dets2 = [PersonDetection(bbox=(d.x1, d.y1, d.x2, d.y2),
                                      conf=d.conf * 0.90) for d in dets2_r]
+            return _merge_nms(dets1 + dets2, low_t)
 
-        # Merge both passes; nms_threshold=0.55 handles cross-pass box offset
-        return _merge_nms(dets1 + dets2, low_t)
+        return dets1
 
     def _detect_pytorch(self, frame: np.ndarray) -> List[PersonDetection]:
         results = self.yolo_model.predict(

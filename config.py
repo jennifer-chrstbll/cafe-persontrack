@@ -99,16 +99,22 @@ REID_COST_WEIGHT = 0.55
 # Performance impact: ~0 OSNet calls in clear frames; 1-3 only during crossings.
 REID_EASY_THRESH = 0.30
 
-# YOLO inference input size. Larger = better for small/far people.
-# 1280 recommended for laptop. 640 for Raspberry Pi 5 (use --skip 3).
-YOLO_INPUT_SIZE = 1280
+# YOLO inference input size.
+# 640 is the native resolution for YOLO11n / YOLO26n and optimal for Edge CPU (RPi5 / Laptop).
+# 960 or 1280 can be used when dedicated GPU acceleration is available.
+YOLO_INPUT_SIZE = 640
 
-# YOLO26 Model Paths (new, edge-optimized, NMS-free)
+# Enable 2nd-pass detection on the upper/far region of the frame.
+# False (default): 1-pass detection for high throughput on Edge CPU (RPi5 / laptop).
+# True: 2-pass detection to maximize recall on distant people (at ~2x compute cost).
+ENABLE_FAR_REGION_PASS = False
+
+# YOLO26 Model Paths (edge-optimized, NMS-free)
 YOLO26_MODEL_PATH = os.path.join(BASE_DIR, "weights", "yolo26n.onnx")
 YOLO26_PT_PATH    = os.path.join(BASE_DIR, "weights", "yolo26n.pt")
 
-# Active model selector: "yolo11" or "yolo26"
-ACTIVE_MODEL = "yolo11"  # Switch to "yolo11" to revert
+# Active model selector: "yolo26" (NMS-free, default) or "yolo11"
+ACTIVE_MODEL = "yolo26"
 
 # PyTorch fallback weight for OSNet
 OSNET_PTH_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25_msmt17.pth")

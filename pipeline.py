@@ -57,8 +57,10 @@ class MultiCamPipeline:
         detections = self.detector.detect(frame)
 
         # Step 2: ByteTrack Single Camera Association
+        # Pass frame=frame so OSNet ReID (Stage 2B fused cost, lost-track
+        # reconnect, spatial-fallback guard, lazy gallery refresh) runs properly.
         tracker = self.trackers[camera_id]
-        local_tracks = tracker.update(detections)
+        local_tracks = tracker.update(detections, frame=frame)
 
         # Step 3: Multi-Camera Lazy ReID & Global ID Assignment
         global_tracks = self.multicam_manager.process_camera_tracks(

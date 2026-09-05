@@ -354,13 +354,14 @@ class ByteTracker:
             if frame is not None:
                 if det.reid_feature is None and recent_lost:
                     det.reid_feature = self._extract(frame, det.tlbr)
+
+                best_sim, best_lost = 0.0, None
                 if det.reid_feature is not None:
                     nf = det.reid_feature / max(float(np.linalg.norm(det.reid_feature)), 1e-6)
-                best_sim, best_lost = 0.0, None
-                for lt in recent_lost:
-                    sim = self._gallery_sim(lt.track_id, nf)
-                    if sim >= reid_thresh and sim > best_sim:
-                        best_sim, best_lost = sim, lt
+                    for lt in recent_lost:
+                        sim = self._gallery_sim(lt.track_id, nf)
+                        if sim >= reid_thresh and sim > best_sim:
+                            best_sim, best_lost = sim, lt
 
                 if best_lost is not None:
                     best_lost.re_activate(det, self.frame_id, new_id=False)
