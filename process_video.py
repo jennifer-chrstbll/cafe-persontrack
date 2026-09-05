@@ -19,8 +19,10 @@ _TRACK_THRESH = 0.25
 _TRACK_BUFFER = 150   # was 250 — reduced to prevent ghost tracks from persisting too long
 _MATCH_THRESH = 0.65  # was 0.60 — tighter gate for fused cost
 _REID_THRESH  = 0.62  # was 0.50 — stricter reconnect threshold for OSNet x0.25
-_REID_WEIGHT  = 0.55  # was 0.35 — raise appearance weight to fix ID-swap-on-crossing
-_MIN_HITS     = 3
+_REID_WEIGHT      = 0.55  # was 0.35 — raise appearance weight to fix ID-swap-on-crossing
+_REID_EASY_THRESH = 0.30  # IoU cost threshold for Stage 2A unambiguous match (no ReID)
+_MIN_HITS         = 3
+_MISS_GRACE       = 5     # consecutive misses before removing confirmed track
 
 
 def _apply_config(conf):
@@ -31,6 +33,7 @@ def _apply_config(conf):
     config.MATCH_THRESH           = _MATCH_THRESH
     config.REID_SIMILARITY_THRESH = _REID_THRESH
     config.REID_COST_WEIGHT       = _REID_WEIGHT
+    config.REID_EASY_THRESH       = _REID_EASY_THRESH
 
 
 def draw(frame, tracks, confirmed, fi, tf, fps, n_unique, model_label):
@@ -106,6 +109,7 @@ def process(video_in,
     fi = 0
     t0 = time.time()
     streaks   = {}
+    misses    = {}
     confirmed = set()
     unique    = set()
 
@@ -128,12 +132,17 @@ def process(video_in,
         seen = {t.track_id for t in tracks}
         for tid in seen:
             streaks[tid] = streaks.get(tid, 0) + 1
+            misses[tid]  = 0
             if streaks[tid] >= _MIN_HITS:
                 confirmed.add(tid)
                 unique.add(tid)
         for tid in list(streaks):
             if tid not in seen:
-                streaks[tid] = 0
+                misses[tid] = misses.get(tid, 0) + 1
+                if misses[tid] >= _MISS_GRACE:
+                    confirmed.discard(tid)
+                    streaks.pop(tid, None)
+                    misses.pop(tid, None)
 
         spd = 1.0 / max(1e-5, time.time() - tt)
         ann = draw(frame, tracks, confirmed, fi, TF, spd, len(unique), model_label)
@@ -148,7 +157,7 @@ def process(video_in,
         if fi % 50 == 0:
             ak = sum(1 for t in tracks if t.track_id in confirmed)
             print("  [%5.1f%%] f%d/%d | Aktif:%d | Unik:%d | %.1ffps" % (
-                fi / TF * 100, fi, TF, ak, len(unique), spd))
+                fi / TF * 100, fi, TF, ak, len(unique), spd), flush=True)
 
     cap.release()
     writer.release()

@@ -1,22 +1,24 @@
 {
-  "device_target": "Raspberry Pi 5 / Edge CPU",
-  "yolo11n_onnx_avg_ms": 93.23,
-  "yolo11n_onnx_std_ms": 12.84,
-  "bytetrack_avg_ms": 0.02,
-  "osnet_reid_crop_ms": 145.07,
+  "benchmark_environment": "win32",
+  "detector_model": "yolo11",
+  "detection_avg_ms": 633.58,
+  "detection_std_ms": 41.85,
+  "bytetrack_avg_ms": 91.47,
+  "osnet_reid_crop_ms": 150.2,
   "workload_performance": {
     "1_people": {
-      "total_frame_ms": 107.75,
-      "estimated_fps": 9.3
+      "total_frame_ms": 755.09,
+      "estimated_fps": 1.3
     },
     "3_people": {
-      "total_frame_ms": 136.77,
-      "estimated_fps": 7.3
+      "total_frame_ms": 815.17,
+      "estimated_fps": 1.2
     },
     "5_people": {
-      "total_frame_ms": 165.78,
-      "estimated_fps": 6.0
+      "total_frame_ms": 875.25,
+      "estimated_fps": 1.1
     }
   },
-  "overall_status": "PASS"
+  "target_fps_threshold": 8.0,
+  "evaluation_status": "NEEDS_OPTIMIZATION"
 }

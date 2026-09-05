@@ -112,9 +112,11 @@ def _camera_worker(
     frame_count = 0
     last_sync = 0.0
     last_active_tracks = []
-    # Streak debounce — same MIN_HITS logic as process_video.py & pipeline.py
-    _MIN_HITS = 3
+    # Streak debounce — same MIN_HITS / MISS_GRACE logic as pipeline.py
+    _MIN_HITS   = 3
+    _MISS_GRACE = 5
     _streaks: Dict[int, int] = {}
+    _misses:  Dict[int, int] = {}
     _confirmed: set = set()
 
     while _running:
@@ -142,16 +144,20 @@ def _camera_worker(
             frame=frame
         )
 
-        # ── Step 4: Streak debounce — stabilize occupancy count ──
+        # ── Step 4: Streak debounce with grace period (ADD=3 frames, REMOVE=5 misses) ──
         seen = {t.track_id for t in global_tracks}
         for tid in seen:
             _streaks[tid] = _streaks.get(tid, 0) + 1
+            _misses[tid]  = 0
             if _streaks[tid] >= _MIN_HITS:
                 _confirmed.add(tid)
         for tid in list(_streaks):
             if tid not in seen:
-                _streaks[tid] = 0
-        _confirmed.intersection_update(seen | {tid for tid, s in _streaks.items() if s > 0})
+                _misses[tid] = _misses.get(tid, 0) + 1
+                if _misses[tid] >= _MISS_GRACE:
+                    _confirmed.discard(tid)
+                    _streaks.pop(tid, None)
+                    _misses.pop(tid, None)
 
         last_active_tracks = [t for t in global_tracks if t.track_id in _confirmed]
         elapsed_ms = (time.time() - t0) * 1000

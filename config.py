@@ -92,6 +92,13 @@ BACKEND_API_URL = 'http://localhost:8001/api/v1'
 # This directly fixes the "baju jelas beda tapi ID swap" problem.
 REID_COST_WEIGHT = 0.55
 
+# 2-Stage primary association gate (Stage 2A IoU-only threshold).
+# Detections with IoU cost < this value are matched unambiguously without ReID.
+# IoU cost 0.30 = IoU overlap 0.70 — well-separated people almost always hit this.
+# Only detections above 0.30 (ambiguous positions) proceed to Stage 2B with ReID.
+# Performance impact: ~0 OSNet calls in clear frames; 1-3 only during crossings.
+REID_EASY_THRESH = 0.30
+
 # YOLO inference input size. Larger = better for small/far people.
 # 1280 recommended for laptop. 640 for Raspberry Pi 5 (use --skip 3).
 YOLO_INPUT_SIZE = 1280

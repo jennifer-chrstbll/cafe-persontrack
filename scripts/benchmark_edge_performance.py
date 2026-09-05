@@ -90,10 +90,11 @@ def benchmark_tracking_pipeline(num_frames: int = 50):
 
     avg_reid_ms = float(np.mean(reid_times))
 
-    # 5. Workload Simulations (1 person, 3 persons, 5 persons) with Lazy ReID (every 10th frame)
+    # 5. Workload Simulations (1 person, 3 persons, 5 persons) with Lazy ReID
     workload_results = {}
+    lazy_freq = 1.0 / max(1, getattr(ByteTracker, 'REID_UPDATE_INTERVAL', 5))
     for n_people in [1, 3, 5]:
-        total_frame_ms = avg_det_ms + avg_track_ms + (n_people * avg_reid_ms * 0.10)
+        total_frame_ms = avg_det_ms + avg_track_ms + (n_people * avg_reid_ms * lazy_freq)
         est_fps = 1000.0 / max(1e-5, total_frame_ms)
         workload_results[f"{n_people}_people"] = {
             "total_frame_ms": round(total_frame_ms, 2),

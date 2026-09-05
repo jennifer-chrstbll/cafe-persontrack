@@ -226,17 +226,6 @@ class ByteTracker:
         for det in detections:
             st = STrack(det.tlwh, det.conf)
             (high_dets if det.conf >= config.TRACK_THRESH else low_dets).append(st)
-
-        # Pre-extract features for HIGH-conf detections only
-        high_det_feats = None
-        if frame is not None and high_dets:
-            feats = []
-            for d in high_dets:
-                f = self._extract(frame, d.tlbr)
-                d.reid_feature = f
-                feats.append(f if f is not None else np.zeros(config.REID_FEATURE_DIM))
-            high_det_feats = np.stack(feats)
-
         unconfirmed, tracked_stracks = [], []
         for t in self.tracked_stracks:
             (unconfirmed if not t.is_activated else tracked_stracks).append(t)
@@ -245,25 +234,79 @@ class ByteTracker:
         for st in strack_pool:
             st.predict()
 
-        # Step 2: Primary association (Fused IoU + ReID)
-        reid_w = getattr(config, 'REID_COST_WEIGHT', 0.35)
-        tr_feats = self._get_track_feats(strack_pool)
-        cost2 = fused_distance(strack_pool, high_dets, tr_feats,
-                               high_det_feats, reid_weight=reid_w)
-        matches, u_track, u_detection = linear_assignment(cost2, config.MATCH_THRESH)
+        # Step 2: 2-Stage Primary Association
+        # ────────────────────────────────────────────────────────────────────
+        # WHY: The old approach extracted ReID (OSNet) for EVERY high-conf
+        # detection EVERY frame — 5 people = 5× OSNet ≈ 1.3s → 1-2 FPS.
+        #
+        # Stage 2A — IoU-only for UNAMBIGUOUS matches (zero ReID cost)
+        # A detection is "unambiguous" if it clearly overlaps one specific
+        # track and no other: IoU cost < EASY_THRESH (i.e., IoU > 0.70).
+        # This covers ~80-95% of frames where people are well-separated.
+        #
+        # Stage 2B — Fused IoU+ReID for AMBIGUOUS subset only
+        # Only the tracks/detections that 2A couldn't cleanly resolve go here.
+        # Typical count: 0 in clear frames, 1-3 during crossings/occlusions.
+        # ReID extraction happens ONLY for this tiny subset.
+        # ────────────────────────────────────────────────────────────────────
+        easy_thresh = getattr(config, 'REID_EASY_THRESH', 0.30)
+        reid_w      = getattr(config, 'REID_COST_WEIGHT',  0.55)
 
-        for it, id_ in matches:
+        # Stage 2A: pure IoU matching — no OSNet, very fast
+        iou_cost_a = iou_distance(strack_pool, high_dets)
+        matches_a, u_track_a, u_det_a = linear_assignment(iou_cost_a, easy_thresh)
+
+        for it, id_ in matches_a:
             track = strack_pool[it]
-            det = high_dets[id_]
+            det   = high_dets[id_]
             if track.state == TrackState.Tracked:
                 track.update(det, self.frame_id)
                 activated_stracks.append(track)
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
-            # Update gallery for ALL matched tracks (Tracked + re-activated)
-            if det.reid_feature is not None:
-                self._update_memory(track.track_id, det.reid_feature)
+            # Appearance memory refreshed lazily by _lazy_reid_update, not here
+
+        # Stage 2B: fused IoU+ReID for ambiguous remainder only
+        ambig_tracks = [strack_pool[i] for i in u_track_a]
+        ambig_dets   = [high_dets[i]   for i in u_det_a]
+
+        # Extract ReID ONLY for ambiguous detections (often zero!)
+        if frame is not None and ambig_dets:
+            for d in ambig_dets:
+                d.reid_feature = self._extract(frame, d.tlbr)
+            ambig_det_feats = np.stack([
+                d.reid_feature if d.reid_feature is not None
+                else np.zeros(config.REID_FEATURE_DIM)
+                for d in ambig_dets
+            ])
+        else:
+            ambig_det_feats = None
+
+        if ambig_tracks and ambig_dets:
+            tr_feats_b = self._get_track_feats(ambig_tracks)
+            cost_b = fused_distance(ambig_tracks, ambig_dets,
+                                    tr_feats_b, ambig_det_feats, reid_weight=reid_w)
+            matches_b, u_track_b, u_det_b = linear_assignment(cost_b, config.MATCH_THRESH)
+
+            for it, id_ in matches_b:
+                track = ambig_tracks[it]
+                det   = ambig_dets[id_]
+                if track.state == TrackState.Tracked:
+                    track.update(det, self.frame_id)
+                    activated_stracks.append(track)
+                else:
+                    track.re_activate(det, self.frame_id, new_id=False)
+                    refind_stracks.append(track)
+                if det.reid_feature is not None:
+                    self._update_memory(track.track_id, det.reid_feature)
+
+            # Map back to original strack_pool / high_dets index spaces
+            u_track     = [u_track_a[i] for i in u_track_b]
+            u_detection = [u_det_a[i]   for i in u_det_b]
+        else:
+            u_track     = list(u_track_a)
+            u_detection = list(u_det_a)
 
         # Step 3: Low-conf association (IoU only)
         r_tracked = [strack_pool[i] for i in u_track
@@ -308,8 +351,11 @@ class ByteTracker:
                 continue
             reconnected = False
 
-            if frame is not None and det.reid_feature is not None:
-                nf = det.reid_feature / max(float(np.linalg.norm(det.reid_feature)), 1e-6)
+            if frame is not None:
+                if det.reid_feature is None and recent_lost:
+                    det.reid_feature = self._extract(frame, det.tlbr)
+                if det.reid_feature is not None:
+                    nf = det.reid_feature / max(float(np.linalg.norm(det.reid_feature)), 1e-6)
                 best_sim, best_lost = 0.0, None
                 for lt in recent_lost:
                     sim = self._gallery_sim(lt.track_id, nf)

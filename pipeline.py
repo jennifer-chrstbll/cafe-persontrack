@@ -32,8 +32,10 @@ class MultiCamPipeline:
         # A track is only counted as "confirmed" after being seen for MIN_HITS
         # consecutive processed frames. This prevents occupancy from fluctuating
         # on every single missed detection (motion blur, brief occlusion).
-        self._MIN_HITS = 3
+        self._MIN_HITS  = 3   # frames seen consecutively before counting as confirmed
+        self._MISS_GRACE = 5  # consecutive misses before removing from confirmed
         self._streaks: Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
+        self._misses:  Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
         self._confirmed: Dict[str, set] = {cam_id: set() for cam_id in camera_ids}
 
     def process_frame(self, camera_id: str, frame: np.ndarray) -> List[STrack]:
@@ -47,7 +49,8 @@ class MultiCamPipeline:
         """
         if camera_id not in self.trackers:
             self.trackers[camera_id] = ByteTracker(camera_id=camera_id)
-            self._streaks[camera_id] = {}
+            self._streaks[camera_id]  = {}
+            self._misses[camera_id]   = {}
             self._confirmed[camera_id] = set()
 
         # Step 1: Detect Persons
@@ -64,19 +67,30 @@ class MultiCamPipeline:
             frame=frame
         )
 
-        # Step 4: Streak debounce — count only tracks confirmed for MIN_HITS frames
-        streaks = self._streaks[camera_id]
+        # Step 4: Streak debounce with grace period on both sides.
+        # ADD side: need MIN_HITS consecutive frames before counting as confirmed.
+        # REMOVE side: need MISS_GRACE consecutive misses before removing from
+        # confirmed. A single missed detection (motion blur, brief occlusion) no
+        # longer instantly drops the occupancy count.
+        streaks   = self._streaks[camera_id]
+        misses    = self._misses[camera_id]
         confirmed = self._confirmed[camera_id]
         seen = {t.track_id for t in global_tracks}
+
         for tid in seen:
             streaks[tid] = streaks.get(tid, 0) + 1
+            misses[tid]  = 0  # seen this frame — reset miss counter
             if streaks[tid] >= self._MIN_HITS:
                 confirmed.add(tid)
+
         for tid in list(streaks):
             if tid not in seen:
-                streaks[tid] = 0  # reset streak on miss; remove from confirmed next cycle
-        # Tracks whose streak reset are removed from confirmed set
-        confirmed.intersection_update(seen | {tid for tid, s in streaks.items() if s > 0})
+                misses[tid] = misses.get(tid, 0) + 1
+                if misses[tid] >= self._MISS_GRACE:
+                    # Missing for MISS_GRACE frames in a row — now safe to remove
+                    confirmed.discard(tid)
+                    streaks.pop(tid, None)
+                    misses.pop(tid, None)
 
         confirmed_tracks = [t for t in global_tracks if t.track_id in confirmed]
 
