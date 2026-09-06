@@ -230,8 +230,33 @@ class ByteTracker:
         for t in self.tracked_stracks:
             (unconfirmed if not t.is_activated else tracked_stracks).append(t)
 
-        strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
+        strack_pool = tracked_stracks
+        # FIX (root cause of severe undercounting on real footage): previously
+        # `strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)`
+        # mixed continuously-tracked AND Lost tracks into the SAME pool used
+        # by Stage 2A's appearance-free "easy" IoU match. That meant a track
+        # that had been Lost for 70+ frames could be silently handed to a
+        # brand-new, completely different person the moment they happened to
+        # stand in a similar screen position (e.g. a checkout counter), with
+        # ZERO appearance verification. Different real visitors kept getting
+        # merged into the same handful of stale track IDs, undercounting
+        # unique visitors.
+        #
+        # Lost tracks are now ONLY reconsidered through the dedicated,
+        # appearance-gated reconnect logic in Step 5 below (cosine similarity
+        # >= REID_SIMILARITY_THRESH, spatial fallback with a minimum
+        # similarity guard, and a max-age cutoff) — never through the
+        # appearance-free Stage 2A/2B fast paths.
         for st in strack_pool:
+            st.predict()
+        for st in self.lost_stracks:
+            st.predict()
+        # Unconfirmed tracks (brand-new, only 1 hit so far) were previously
+        # never Kalman-predicted before their single make-or-break IoU check
+        # in Step 4. With frame_skip>1 the real-time gap between processed
+        # frames is larger, so their frozen box drifted away from the moving
+        # person and they were deleted before ever being confirmed.
+        for st in unconfirmed:
             st.predict()
 
         # Step 2: 2-Stage Primary Association
