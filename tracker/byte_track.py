@@ -353,16 +353,27 @@ class ByteTracker:
                 lost_stracks.append(t)
 
         # Step 4: Unconfirmed tracks
+        # IoU threshold loosened 0.70 -> 0.55 (IoU cost < 0.55 = IoU > 0.45).
+        # Reason: with frame_skip=2 and a heavier ReID model, Kalman-predicted
+        # boxes for brand-new tracks can drift further from the actual detection
+        # before the second-frame confirmation check — 0.70 was too strict and
+        # caused nearly every new track to be killed in one miss.
         dets_rem = [high_dets[i] for i in u_detection]
         matches4, u_unconf, u_det_rem = linear_assignment(
-            iou_distance(unconfirmed, dets_rem), 0.70)
+            iou_distance(unconfirmed, dets_rem), 0.55)
         for it, id_ in matches4:
             unconfirmed[it].update(dets_rem[id_], self.frame_id)
             activated_stracks.append(unconfirmed[it])
         for i in u_unconf:
             t = unconfirmed[i]
-            t.state = TrackState.Removed
-            removed_stracks.append(t)
+            # Grace period: give unconfirmed track 1 extra missed frame before
+            # permanent removal, so a single IoU miss due to bbox drift doesn't
+            # kill a legitimate new person detection.
+            t._unconf_misses = getattr(t, '_unconf_misses', 0) + 1
+            if t._unconf_misses >= 2:
+                t.state = TrackState.Removed
+                removed_stracks.append(t)
+            # else: keep in tracked_stracks as unconfirmed for next frame
 
         # Step 5: New tracks & ReID reconnect
         reid_thresh = getattr(config, 'REID_SIMILARITY_THRESH', 0.50)
