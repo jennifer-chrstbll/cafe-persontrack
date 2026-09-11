@@ -4,7 +4,10 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 
 from models.detector import PersonDetector
-from tracker.botsort_tracker import BotSortTracker, BotSortTrack
+# CHANGED: swapped manual ByteTrack for BoxMOT's BoT-SORT (see tracker/botsort_wrapper.py).
+# Old import kept commented for a quick A/B revert if needed:
+# from tracker.byte_track import ByteTracker, STrack
+from tracker.botsort_wrapper import BotSortTracker, BotSortTracker as ByteTracker, STrack  # noqa: F401
 from multicam.multicam_manager import MultiCamManager
 from api_client import CRMBackendClient, sync_telemetry_background
 import config
@@ -41,7 +44,7 @@ class MultiCamPipeline:
         self._misses:  Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
         self._confirmed: Dict[str, set] = {cam_id: set() for cam_id in camera_ids}
 
-    def process_frame(self, camera_id: str, frame: np.ndarray) -> List[BotSortTrack]:
+    def process_frame(self, camera_id: str, frame: np.ndarray) -> List[STrack]:
         """
         Processes a single camera frame:
         1. Runs YOLO26n/YOLO11n person detection (class 0 only).
@@ -125,7 +128,7 @@ class MultiCamPipeline:
         self,
         frame: np.ndarray,
         camera_id: str,
-        tracks: List[BotSortTrack],
+        tracks: List[STrack],
         fps: float = 0.0
     ) -> np.ndarray:
         """

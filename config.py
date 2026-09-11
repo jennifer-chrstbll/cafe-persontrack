@@ -58,8 +58,20 @@ YOLO11_PT_PATH    = DETECTOR_PATHS["yolo11n"]["pt"]
 
 # OSNet ReID weights (used by BotSortTracker and MultiCamManager)
 OSNET_MODEL_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25.onnx")
+OSNET_MODEL_PATH_FP16 = os.path.join(BASE_DIR, "weights", "osnet_x0_25_fp16.onnx")
+OSNET_MODEL_PATH_INT8 = os.path.join(BASE_DIR, "weights", "osnet_x0_25_int8.onnx")
 OSNET_PT_PATH    = os.path.join(BASE_DIR, "weights", "osnet_x0_25_msmt17.pth")
 OSNET_PTH_PATH   = OSNET_PT_PATH  # alias used by reid.py
+
+OSNET_PRECISION = os.getenv("OSNET_PRECISION", "fp16")  # "fp32" | "fp16" | "int8"
+_OSNET_PATHS = {
+    "fp32": OSNET_MODEL_PATH,
+    "fp16": OSNET_MODEL_PATH_FP16 if os.path.exists(OSNET_MODEL_PATH_FP16) else OSNET_MODEL_PATH,
+    "int8": OSNET_MODEL_PATH_INT8 if os.path.exists(OSNET_MODEL_PATH_INT8) else OSNET_MODEL_PATH,
+}
+OSNET_ACTIVE_PATH = _OSNET_PATHS.get(OSNET_PRECISION, OSNET_MODEL_PATH)
+
+TRACKER_BACKEND = os.getenv("TRACKER_BACKEND", "botsort")  # "botsort" | "bytetrack"
 
 # Detection Parameters
 DETECTION_CONF_THRESH = 0.18
