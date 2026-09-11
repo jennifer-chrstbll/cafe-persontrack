@@ -1,5 +1,5 @@
 """
-process_video.py -- CCTV Person Tracking (YOLO26n / YOLO11n + ByteTrack + OSNet ReID)
+process_video.py -- CCTV Person Tracking (YOLO26n / YOLO11n + BoT-SORT + OSNet ReID)
 =======================================================================================
 Usage:
   python process_video.py --video cctv_test.mp4                        # Optimal default: YOLO26n, imgsz=640, skip=2
@@ -10,7 +10,7 @@ Usage:
 """
 import os, time, argparse, cv2, numpy as np
 from models.detector import PersonDetector
-from tracker.byte_track import ByteTracker
+from tracker.botsort_tracker import BotSortTracker
 import config
 
 _CONF         = 0.18
@@ -93,7 +93,7 @@ def process(video_in,
     TF     = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     active_model = (model or getattr(config, "ACTIVE_MODEL", "yolo26")).lower()
-    model_label  = "YOLO26n (NMS-free)" if active_model == "yolo26" else "YOLO11n"
+    model_label  = "YOLO26n (NMS-free) + BoT-SORT" if active_model == "yolo26" else "YOLO11n + BoT-SORT"
 
     print("=" * 65)
     print("CCTV TRACKING  model=%s  conf=%.2f  imgsz=%d  skip=%d  far_pass=%s" % (
@@ -106,7 +106,7 @@ def process(video_in,
     writer   = cv2.VideoWriter(video_out, cv2.VideoWriter_fourcc(*"mp4v"), fps_in, (W, H))
     detector = PersonDetector(conf_thresh=conf, use_onnx=True,
                               input_size=imgsz, model_name=model)
-    tracker  = ByteTracker(camera_id="CAM_EVAL", fps=fps_in)
+    tracker  = BotSortTracker(camera_id="CAM_EVAL", fps=fps_in)
 
     fi = 0
     t0 = time.time()
@@ -127,8 +127,7 @@ def process(video_in,
             tracks = tracker.update(dets, frame=frame)
         else:
             # Skipped frame: Kalman predict only (~0.2ms, no YOLO/ReID)
-            for t in tracker.tracked_stracks:
-                t.predict()
+            tracker.predict_all()
             tracks = [t for t in tracker.tracked_stracks if t.is_activated]
 
         seen = {t.track_id for t in tracks}

@@ -6,7 +6,7 @@ import argparse
 from typing import List
 
 from models.detector import PersonDetector
-from tracker.byte_track import ByteTracker, STrack
+from tracker.botsort_tracker import BotSortTracker, BotSortTrack
 from api_client import CRMBackendClient, sync_telemetry_background
 import config
 
@@ -20,7 +20,7 @@ def run_single_cam_demo(camera_source: str = "0", camera_id: str = "CAM_1", targ
     print("---------------------------------------------------------")
 
     detector = PersonDetector(conf_thresh=config.DETECTION_CONF_THRESH, use_onnx=True)
-    tracker = ByteTracker(camera_id=camera_id)
+    tracker = BotSortTracker(camera_id=camera_id)
     backend_client = CRMBackendClient()
 
     if camera_source.isdigit():
@@ -58,7 +58,7 @@ def run_single_cam_demo(camera_source: str = "0", camera_id: str = "CAM_1", targ
             # Step 1: Person Detection
             detections = detector.detect(frame)
 
-            # Step 2: ByteTrack Tracking with OSNet ReID Appearance Persistence
+            # Step 2: BoT-SORT Tracking with OSNet ReID Appearance Matching
             active_tracks = tracker.update(detections, frame=frame)
 
         elapsed = time.time() - t_start
@@ -109,7 +109,7 @@ def run_single_cam_demo(camera_source: str = "0", camera_id: str = "CAM_1", targ
         # HUD Stats Header
         h, w = out_frame.shape[:2]
         cv2.rectangle(out_frame, (0, 0), (w, 40), (25, 25, 25), -1)
-        hud_text = f"SINGLE CAM DEMO | Mode: {target_fps} FPS (Stride 1/{frame_stride}) | People: {len(active_tracks)}"
+        hud_text = f"SINGLE CAM DEMO | BoT-SORT | Mode: {target_fps} FPS (Stride 1/{frame_stride}) | People: {len(active_tracks)}"
         cv2.putText(out_frame, hud_text, (20, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
 
         cv2.imshow(f"Kafe Person Tracking - Single Cam Webcam Demo ({target_fps} FPS Mode)", out_frame)

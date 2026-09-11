@@ -176,8 +176,8 @@ class PersonDetector:
             onnx_path = getattr(config, 'YOLO26_MODEL_PATH', '')
             pt_path   = getattr(config, 'YOLO26_PT_PATH',    'yolo26n.pt')
         else:
-            onnx_path = config.YOLO_MODEL_PATH
-            pt_path   = config.YOLO_PT_PATH
+            onnx_path = getattr(config, 'YOLO11_MODEL_PATH', config.YOLO_MODEL_PATH)
+            pt_path   = getattr(config, 'YOLO11_PT_PATH',    config.YOLO_PT_PATH)
 
         label = 'YOLO26n (NMS-free, STAL)' if self.is_yolo26 else 'YOLO11n'
 
@@ -234,12 +234,12 @@ class PersonDetector:
     def detect(self, frame: np.ndarray) -> List[PersonDetection]:
         if frame is None or frame.size == 0:
             return []
-        enhanced = enhance_frame(frame)
         if self.session is not None:
-            return self._detect_onnx(enhanced)
+            return self._detect_onnx(frame)
         elif self.yolo_model is not None:
-            return self._detect_pytorch(enhanced)
+            return self._detect_pytorch(frame)
         else:
+            enhanced = enhance_frame(frame)
             return self._detect_hog(enhanced)
 
     def _detect_onnx(self, frame: np.ndarray) -> List[PersonDetection]:

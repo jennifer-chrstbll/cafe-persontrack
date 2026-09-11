@@ -9,3 +9,4 @@ httpx>=0.24.0
 pydantic>=2.0.0
 pytest>=7.0.0
 gdown>=4.7.0
+boxmot>=25.0.0

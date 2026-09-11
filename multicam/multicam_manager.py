@@ -1,7 +1,6 @@
 import time
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
-from tracker.byte_track import STrack
 from models.reid import OSNetExtractor
 from multicam.transition_zone import TransitionZone
 import config
@@ -70,14 +69,18 @@ class MultiCamManager:
     def process_camera_tracks(
         self,
         camera_id: str,
-        tracks: List[STrack],
+        tracks: List[Any],
         frame: np.ndarray
-    ) -> List[STrack]:
+    ) -> List[Any]:
         """
         Main multi-camera processing step for a single camera frame:
         1. Assigns Global Track IDs to new tracks.
         2. Evaluates Lazy ReID ONLY when tracks are inside/entering transition zones.
         3. Matches incoming tracks with transition cache from other cameras.
+
+        Accepts any track object with the following attributes:
+            .track_id, .centroid, .tlbr, .global_track_id, .visit_id, .reid_feature
+        Compatible with both STrack (ByteTracker) and BotSortTrack (BotSortTracker).
         """
         self.clean_expired_cache()
         cam_zones = self.transition_zones.get(camera_id, [])

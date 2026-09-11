@@ -41,7 +41,7 @@ except ImportError:
     pass  # dotenv optional — env vars can be exported directly on Pi
 
 from models.detector import PersonDetector
-from tracker.byte_track import ByteTracker
+from tracker.botsort_tracker import BotSortTracker
 from multicam.multicam_manager import MultiCamManager
 from supabase_client import push_occupancy_background
 import config
@@ -90,14 +90,14 @@ def _camera_worker(
     camera_id: str,
     source: str,
     detector: PersonDetector,
-    tracker: ByteTracker,
+    tracker: BotSortTracker,
     multicam_manager: MultiCamManager,
     floor: int,
 ):
     """
     Runs in its own thread — one thread per CCTV camera.
-    Each thread reads frames, runs YOLO11n detection, ByteTrack tracking,
-    and lazy OSNet ReID for cross-camera identity, then pushes occupancy
+    Each thread reads frames, runs YOLO26n/YOLO11n detection, BoT-SORT tracking,
+    and OSNet ReID for cross-camera identity, then pushes occupancy
     count to Supabase every SYNC_INTERVAL_SEC.
     """
     logger.info(f"[{camera_id}] Opening stream: {source!r}")
@@ -135,7 +135,7 @@ def _camera_worker(
             # ── Step 1: Person Detection (YOLO11n / YOLO26n ONNX) ──
             detections = detector.detect(frame)
 
-            # ── Step 2: ByteTrack Single-Camera Tracking ──
+            # ── Step 2: BoT-SORT Single-Camera Tracking ──
             local_tracks = tracker.update(detections, frame=frame)
 
             # ── Step 3: Multi-Camera Global ID + Lazy ReID ──
@@ -192,11 +192,11 @@ def main():
 
     print("═══════════════════════════════════════════════════════════")
     print("   CAFE PERSON TRACKING AGENT — Raspberry Pi 5 Edition")
-    print("   YOLO11n + ByteTrack + OSNet ReID + Supabase Real-time")
+    print("   YOLO26n + BoT-SORT + OSNet ReID + Supabase Real-time")
     print("═══════════════════════════════════════════════════════════")
 
     # ── Load Models (shared across cameras — thread-safe for inference) ──
-    logger.info("Loading YOLO11n ONNX detector...")
+    logger.info("Loading YOLO26n/YOLO11n ONNX detector (DETECTOR_BACKEND=%s)...", config.DETECTOR_BACKEND)
     detector = PersonDetector(conf_thresh=config.DETECTION_CONF_THRESH, use_onnx=True)
 
     logger.info("Loading MultiCamManager (OSNet ReID)...")
@@ -218,7 +218,7 @@ def main():
     for cam_id, source in cam_sources.items():
         cam_cfg = config.DEFAULT_CAMERAS_CONFIG.get(cam_id, {})
         floor = cam_cfg.get("floor", 1)
-        tracker = ByteTracker(camera_id=cam_id)
+        tracker = BotSortTracker(camera_id=cam_id)
 
         t = threading.Thread(
             target=_camera_worker,

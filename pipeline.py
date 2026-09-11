@@ -4,24 +4,27 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 
 from models.detector import PersonDetector
-from tracker.byte_track import ByteTracker, STrack
+from tracker.botsort_tracker import BotSortTracker, BotSortTrack
 from multicam.multicam_manager import MultiCamManager
 from api_client import CRMBackendClient, sync_telemetry_background
 import config
 
 class MultiCamPipeline:
     """
-    Multi-Camera Person Detection, ByteTrack, & Lazy ReID Pipeline Engine.
+    Multi-Camera Person Detection, BoT-SORT, & Lazy ReID Pipeline Engine.
     Processes video frames from multiple CCTV feeds simultaneously.
+
+    Uses YOLO26n (NMS-free) or YOLO11n for detection (via DETECTOR_BACKEND env var)
+    and BoxMOT BoT-SORT with OSNet x0_25 for tracking + ReID.
     """
     def __init__(self, camera_ids: Optional[List[str]] = None, use_onnx: bool = True):
         if camera_ids is None:
             camera_ids = ["CAM_1", "CAM_2"]
-            
+
         self.camera_ids = camera_ids
         self.detector = PersonDetector(conf_thresh=config.DETECTION_CONF_THRESH, use_onnx=use_onnx)
-        self.trackers: Dict[str, ByteTracker] = {
-            cam_id: ByteTracker(camera_id=cam_id) for cam_id in camera_ids
+        self.trackers: Dict[str, BotSortTracker] = {
+            cam_id: BotSortTracker(camera_id=cam_id) for cam_id in camera_ids
         }
         self.multicam_manager = MultiCamManager()
         self.backend_client = CRMBackendClient()
@@ -38,17 +41,17 @@ class MultiCamPipeline:
         self._misses:  Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
         self._confirmed: Dict[str, set] = {cam_id: set() for cam_id in camera_ids}
 
-    def process_frame(self, camera_id: str, frame: np.ndarray) -> List[STrack]:
+    def process_frame(self, camera_id: str, frame: np.ndarray) -> List[BotSortTrack]:
         """
         Processes a single camera frame:
-        1. Runs YOLO11n person detection (class 0 only).
-        2. Updates single-camera ByteTrack tracker.
+        1. Runs YOLO26n/YOLO11n person detection (class 0 only).
+        2. Updates single-camera BoT-SORT tracker.
         3. Applies Multi-Camera Global ID mapping & Lazy ReID association.
         4. Updates streak debounce (MIN_HITS=3) to stabilize occupancy count.
         5. Telemetry push to backend every SYNC_INTERVAL_SEC.
         """
         if camera_id not in self.trackers:
-            self.trackers[camera_id] = ByteTracker(camera_id=camera_id)
+            self.trackers[camera_id] = BotSortTracker(camera_id=camera_id)
             self._streaks[camera_id]  = {}
             self._misses[camera_id]   = {}
             self._confirmed[camera_id] = set()
@@ -56,9 +59,8 @@ class MultiCamPipeline:
         # Step 1: Detect Persons
         detections = self.detector.detect(frame)
 
-        # Step 2: ByteTrack Single Camera Association
-        # Pass frame=frame so OSNet ReID (Stage 2B fused cost, lost-track
-        # reconnect, spatial-fallback guard, lazy gallery refresh) runs properly.
+        # Step 2: BoT-SORT Single Camera Association
+        # Passes frame so BotSort can run OSNet ReID appearance matching internally.
         tracker = self.trackers[camera_id]
         local_tracks = tracker.update(detections, frame=frame)
 
@@ -123,7 +125,7 @@ class MultiCamPipeline:
         self,
         frame: np.ndarray,
         camera_id: str,
-        tracks: List[STrack],
+        tracks: List[BotSortTrack],
         fps: float = 0.0
     ) -> np.ndarray:
         """
