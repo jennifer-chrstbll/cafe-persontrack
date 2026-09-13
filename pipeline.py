@@ -7,65 +7,47 @@ from models.detector import PersonDetector
 # CHANGED: swapped manual ByteTrack for BoxMOT's BoT-SORT (see tracker/botsort_wrapper.py).
 # Old import kept commented for a quick A/B revert if needed:
 # from tracker.byte_track import ByteTracker, STrack
-from tracker.botsort_wrapper import BotSortTracker, BotSortTracker as ByteTracker, STrack  # noqa: F401
+from tracker.botsort_wrapper import BotSortTracker as ByteTracker, STrack  # noqa: F401 (alias keeps rest of file unchanged)
 from multicam.multicam_manager import MultiCamManager
 from api_client import CRMBackendClient, sync_telemetry_background
 import config
 
+
 class MultiCamPipeline:
     """
-    Multi-Camera Person Detection, BoT-SORT, & Lazy ReID Pipeline Engine.
+    Multi-Camera Person Detection, BoT-SORT (BoxMOT), & Lazy ReID Pipeline Engine.
     Processes video frames from multiple CCTV feeds simultaneously.
-
-    Uses YOLO26n (NMS-free) or YOLO11n for detection (via DETECTOR_BACKEND env var)
-    and BoxMOT BoT-SORT with OSNet x0_25 for tracking + ReID.
     """
+
     def __init__(self, camera_ids: Optional[List[str]] = None, use_onnx: bool = True):
         if camera_ids is None:
             camera_ids = ["CAM_1", "CAM_2"]
-
         self.camera_ids = camera_ids
         self.detector = PersonDetector(conf_thresh=config.DETECTION_CONF_THRESH, use_onnx=use_onnx)
-        self.trackers: Dict[str, BotSortTracker] = {
-            cam_id: BotSortTracker(camera_id=cam_id) for cam_id in camera_ids
+        self.trackers: Dict[str, ByteTracker] = {
+            cam_id: ByteTracker(camera_id=cam_id) for cam_id in camera_ids
         }
         self.multicam_manager = MultiCamManager()
         self.backend_client = CRMBackendClient()
-
         self.last_sync_time: Dict[str, float] = {cam_id: 0.0 for cam_id in camera_ids}
-
-        # Streak debounce — mirrors MIN_HITS logic from process_video.py.
-        # A track is only counted as "confirmed" after being seen for MIN_HITS
-        # consecutive processed frames. This prevents occupancy from fluctuating
-        # on every single missed detection (motion blur, brief occlusion).
-        self._MIN_HITS  = 3   # frames seen consecutively before counting as confirmed
-        self._MISS_GRACE = 5  # consecutive misses before removing from confirmed
-        self._streaks: Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
-        self._misses:  Dict[str, Dict[int, int]] = {cam_id: {} for cam_id in camera_ids}
-        self._confirmed: Dict[str, set] = {cam_id: set() for cam_id in camera_ids}
 
     def process_frame(self, camera_id: str, frame: np.ndarray) -> List[STrack]:
         """
         Processes a single camera frame:
-        1. Runs YOLO26n/YOLO11n person detection (class 0 only).
-        2. Updates single-camera BoT-SORT tracker.
+        1. Runs YOLO person detection (backend selectable via config.DETECTOR_BACKEND).
+        2. Updates single-camera BoT-SORT tracker (motion + appearance fused matching).
         3. Applies Multi-Camera Global ID mapping & Lazy ReID association.
-        4. Updates streak debounce (MIN_HITS=3) to stabilize occupancy count.
-        5. Telemetry push to backend every SYNC_INTERVAL_SEC.
+        4. Telemetry push to backend every SYNC_INTERVAL_SEC.
         """
         if camera_id not in self.trackers:
-            self.trackers[camera_id] = BotSortTracker(camera_id=camera_id)
-            self._streaks[camera_id]  = {}
-            self._misses[camera_id]   = {}
-            self._confirmed[camera_id] = set()
+            self.trackers[camera_id] = ByteTracker(camera_id=camera_id)
 
         # Step 1: Detect Persons
         detections = self.detector.detect(frame)
 
-        # Step 2: BoT-SORT Single Camera Association
-        # Passes frame so BotSort can run OSNet ReID appearance matching internally.
+        # Step 2: BoT-SORT Single Camera Association (motion + ReID fused)
         tracker = self.trackers[camera_id]
-        local_tracks = tracker.update(detections, frame=frame)
+        local_tracks = tracker.update(detections, frame)
 
         # Step 3: Multi-Camera Lazy ReID & Global ID Assignment
         global_tracks = self.multicam_manager.process_camera_tracks(
@@ -74,40 +56,12 @@ class MultiCamPipeline:
             frame=frame
         )
 
-        # Step 4: Streak debounce with grace period on both sides.
-        # ADD side: need MIN_HITS consecutive frames before counting as confirmed.
-        # REMOVE side: need MISS_GRACE consecutive misses before removing from
-        # confirmed. A single missed detection (motion blur, brief occlusion) no
-        # longer instantly drops the occupancy count.
-        streaks   = self._streaks[camera_id]
-        misses    = self._misses[camera_id]
-        confirmed = self._confirmed[camera_id]
-        seen = {t.track_id for t in global_tracks}
-
-        for tid in seen:
-            streaks[tid] = streaks.get(tid, 0) + 1
-            misses[tid]  = 0  # seen this frame — reset miss counter
-            if streaks[tid] >= self._MIN_HITS:
-                confirmed.add(tid)
-
-        for tid in list(streaks):
-            if tid not in seen:
-                misses[tid] = misses.get(tid, 0) + 1
-                if misses[tid] >= self._MISS_GRACE:
-                    # Missing for MISS_GRACE frames in a row — now safe to remove
-                    confirmed.discard(tid)
-                    streaks.pop(tid, None)
-                    misses.pop(tid, None)
-
-        confirmed_tracks = [t for t in global_tracks if t.track_id in confirmed]
-
-        # Step 5: Background Sync to CRM Backend
+        # Step 4: Background Sync to CRM Backend
         now = time.time()
         if (now - self.last_sync_time.get(camera_id, 0.0)) >= config.SYNC_INTERVAL_SEC:
             self.last_sync_time[camera_id] = now
             cam_cfg = config.DEFAULT_CAMERAS_CONFIG.get(camera_id, {})
             floor = cam_cfg.get("floor", 1)
-
             tracks_payload = [
                 {
                     "camera_id": camera_id,
@@ -118,11 +72,11 @@ class MultiCamPipeline:
                     "velocity_y": round(track.velocity_y, 2),
                     "status": "ACTIVE"
                 }
-                for track in confirmed_tracks
+                for track in global_tracks
             ]
             sync_telemetry_background(self.backend_client, camera_id, floor, tracks_payload)
 
-        return confirmed_tracks
+        return global_tracks
 
     def draw_tracks(
         self,
@@ -138,7 +92,7 @@ class MultiCamPipeline:
         - Occupancy counter & FPS badge.
         """
         annotated_frame = frame.copy()
-        
+
         # 1. Draw Transition Zones
         cam_zones = self.multicam_manager.transition_zones.get(camera_id, [])
         for zone in cam_zones:
@@ -170,7 +124,6 @@ class MultiCamPipeline:
 
         # 3. Draw Header Stats Badge
         h, w = annotated_frame.shape[:2]
-        # len(tracks) here is already the debounced confirmed count (from process_frame)
         info_text = f"Cam: {camera_id} | Occupancy: {len(tracks)} | FPS: {fps:.1f}"
         cv2.rectangle(annotated_frame, (0, 0), (w, 35), (20, 20, 20), -1)
         cv2.putText(annotated_frame, info_text, (15, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)

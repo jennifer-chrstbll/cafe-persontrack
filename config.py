@@ -5,119 +5,85 @@ from typing import Dict, List, Tuple, Any
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ────────────────────────────────────────────────────
-# Detector Backend Selection
+# Detector backend switch — flip with env var, no code edit needed
+# Usage: DETECTOR_BACKEND=yolo26n python demo_single_cam.py
 # ────────────────────────────────────────────────────
-# Switch detectors with one env var — no code changes needed:
-#   DETECTOR_BACKEND=yolo11n python process_video.py --video cctv_test.mp4
-#   DETECTOR_BACKEND=yolo26n python process_video.py --video cctv_test.mp4
-#
-# Defaults to yolo26n (NMS-free, better for edge deployment).
-DETECTOR_BACKEND = os.getenv("DETECTOR_BACKEND", "yolo26n")
+DETECTOR_BACKEND = os.getenv("DETECTOR_BACKEND", "yolo11n")  # "yolo11n" | "yolo26n"
 
 DETECTOR_PATHS: Dict[str, Dict[str, str]] = {
     "yolo11n": {
         "pt":   os.path.join(BASE_DIR, "weights", "yolo11n.pt"),
         "onnx": os.path.join(BASE_DIR, "weights", "yolo11n.onnx"),
         "int8": os.path.join(BASE_DIR, "weights", "yolo11n_int8.onnx"),
-        "fp16": os.path.join(BASE_DIR, "weights", "yolo11n_fp16.onnx"),
     },
     "yolo26n": {
         "pt":   os.path.join(BASE_DIR, "weights", "yolo26n.pt"),
         "onnx": os.path.join(BASE_DIR, "weights", "yolo26n.onnx"),
         "int8": os.path.join(BASE_DIR, "weights", "yolo26n_int8.onnx"),
-        "fp16": os.path.join(BASE_DIR, "weights", "yolo26n_fp16.onnx"),
     },
 }
 
-def resolve_detector_path(backend_name: str) -> str:
-    """Resolve the best ONNX path (INT8/FP16/FP32) for a given detector backend."""
-    b = "yolo26n" if "26" in backend_name.lower() else "yolo11n"
-    paths = DETECTOR_PATHS[b]
-    if b == "yolo26n":
-        # YOLO26n STAL attention head: prefer validated FP16
-        if os.path.exists(paths["fp16"]):
-            return paths["fp16"]
-    else:
-        # YOLO11n: prefer validated Conv-INT8, fallback to FP16
-        if os.path.exists(paths["int8"]):
-            return paths["int8"]
-        if os.path.exists(paths["fp16"]):
-            return paths["fp16"]
-    return paths["onnx"]
+if DETECTOR_BACKEND not in DETECTOR_PATHS:
+    raise ValueError(
+        f"Unknown DETECTOR_BACKEND='{DETECTOR_BACKEND}'. "
+        f"Choose from: {list(DETECTOR_PATHS.keys())}"
+    )
 
-# Resolved paths for the active detector backend
-YOLO_MODEL_PATH = resolve_detector_path(DETECTOR_BACKEND)
-YOLO_PT_PATH    = DETECTOR_PATHS.get(DETECTOR_BACKEND, DETECTOR_PATHS["yolo26n"])["pt"]
+# Precision switch — "int8" once you've quantized + validated, else "onnx" (fp32) or export fp16 yourself
+DETECTOR_PRECISION = os.getenv("DETECTOR_PRECISION", "onnx")  # "onnx" | "int8"
 
-# Legacy aliases (detector.py reads ACTIVE_MODEL, YOLO26_MODEL_PATH, YOLO26_PT_PATH)
-ACTIVE_MODEL     = "yolo26" if DETECTOR_BACKEND == "yolo26n" else "yolo11"
-YOLO26_MODEL_PATH = resolve_detector_path("yolo26n")
-YOLO26_PT_PATH    = DETECTOR_PATHS["yolo26n"]["pt"]
-YOLO11_MODEL_PATH = resolve_detector_path("yolo11n")
-YOLO11_PT_PATH    = DETECTOR_PATHS["yolo11n"]["pt"]
+# Backward-compatible names some of your other modules may still import directly.
+# TODO: once everything reads DETECTOR_PATHS[DETECTOR_BACKEND] instead, these two lines can be deleted.
+YOLO_MODEL_PATH = DETECTOR_PATHS[DETECTOR_BACKEND][DETECTOR_PRECISION if DETECTOR_PRECISION in DETECTOR_PATHS[DETECTOR_BACKEND] else "onnx"]
+YOLO_PT_PATH = DETECTOR_PATHS[DETECTOR_BACKEND]["pt"]
 
-# OSNet ReID weights (used by BotSortTracker and MultiCamManager)
 OSNET_MODEL_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25.onnx")
 OSNET_MODEL_PATH_FP16 = os.path.join(BASE_DIR, "weights", "osnet_x0_25_fp16.onnx")
 OSNET_MODEL_PATH_INT8 = os.path.join(BASE_DIR, "weights", "osnet_x0_25_int8.onnx")
-OSNET_PT_PATH    = os.path.join(BASE_DIR, "weights", "osnet_x0_25_msmt17.pth")
-OSNET_PTH_PATH   = OSNET_PT_PATH  # alias used by reid.py
+OSNET_PT_PATH = os.path.join(BASE_DIR, "weights", "osnet_x0_25_msmt17.pth")
 
+# Which OSNet precision to actually load — default FP16 until you've validated INT8
+# per the quantization-warning checklist (same-person / different-person similarity test).
 OSNET_PRECISION = os.getenv("OSNET_PRECISION", "fp16")  # "fp32" | "fp16" | "int8"
 _OSNET_PATHS = {
     "fp32": OSNET_MODEL_PATH,
-    "fp16": OSNET_MODEL_PATH_FP16 if os.path.exists(OSNET_MODEL_PATH_FP16) else OSNET_MODEL_PATH,
-    "int8": OSNET_MODEL_PATH_INT8 if os.path.exists(OSNET_MODEL_PATH_INT8) else OSNET_MODEL_PATH,
+    "fp16": OSNET_MODEL_PATH_FP16,
+    "int8": OSNET_MODEL_PATH_INT8,
 }
-OSNET_ACTIVE_PATH = _OSNET_PATHS.get(OSNET_PRECISION, OSNET_MODEL_PATH)
-
-TRACKER_BACKEND = os.getenv("TRACKER_BACKEND", "botsort")  # "botsort" | "bytetrack"
+OSNET_ACTIVE_PATH = _OSNET_PATHS[OSNET_PRECISION]
 
 # Detection Parameters
-DETECTION_CONF_THRESH = 0.18
+DETECTION_CONF_THRESH = 0.35
 PERSON_CLASS_ID = 0  # YOLO class 0 is 'person'
 
 # ────────────────────────────────────────────────────
-# BoT-SORT Tracker Parameters
+# Legacy ByteTrack Parameters — kept only for the A/B comparison path
+# (tracker/byte_track.py). Not used by BoT-SORT.
 # ────────────────────────────────────────────────────
-# These map directly to BotSort() constructor kwargs in tracker/botsort_tracker.py.
-# Tune by setting env vars or editing here; retuning guide in migration plan Phase 1.4.
-#
-# track_high_thresh: min detection confidence to start / continue a track as "high"
-BOTSORT_HIGH_THRESH     = float(os.getenv("BOTSORT_HIGH_THRESH",     "0.25"))
-# track_low_thresh: min detection confidence for the second low-conf association pass
-BOTSORT_LOW_THRESH      = float(os.getenv("BOTSORT_LOW_THRESH",      "0.05"))
-# new_track_thresh: min score for a completely new track to be initialised
-BOTSORT_NEW_THRESH      = float(os.getenv("BOTSORT_NEW_THRESH",      "0.25"))
-# track_buffer: frames to keep a lost track before deleting it.
-# At ~13fps on Pi 5: 150 frames ≈ 11.5s — long enough for seated customers.
-BOTSORT_TRACK_BUFFER    = int(os.getenv("BOTSORT_TRACK_BUFFER",      "150"))
-# match_thresh: combined motion+appearance cost gate for first association.
-# BoT-SORT's match_thresh is NOT the same scale as the old ByteTrack MATCH_THRESH.
-# Start at 0.80 (BoxMOT default) and sweep {0.70, 0.80, 0.90} per Phase 1.4.
-BOTSORT_MATCH_THRESH    = float(os.getenv("BOTSORT_MATCH_THRESH",    "0.80"))
-# proximity_thresh: IoU gate that limits appearance matching to nearby tracks only
-BOTSORT_PROXIMITY_THRESH = float(os.getenv("BOTSORT_PROXIMITY_THRESH", "0.5"))
-# appearance_thresh: appearance distance gate (1 - cosine_sim).
-# 0.25 → requires cosine similarity ≥ 0.75. Sweep {0.20, 0.25, 0.30} per Phase 1.4.
-BOTSORT_APPEARANCE_THRESH = float(os.getenv("BOTSORT_APPEARANCE_THRESH", "0.25"))
-# second_match_thresh: cost gate for the second association (lost tracks)
-BOTSORT_SECOND_MATCH_THRESH = float(os.getenv("BOTSORT_SECOND_MATCH_THRESH", "0.5"))
+TRACK_THRESH = 0.4       # Threshold for high-confidence detections
+TRACK_BUFFER = 90        # Frames to keep lost tracks before removing (3 seconds @ 30fps)
+MATCH_THRESH = 0.85      # Max IoU distance for first association (ByteTrack-specific, NOT reused by BoT-SORT)
+LOW_CONF_THRESH = 0.1    # Threshold for low-confidence detections
 
 # ────────────────────────────────────────────────────
-# Legacy ByteTrack Parameters (kept for backward compat with existing unit tests)
+# BoT-SORT (BoxMOT) Parameters — active tracker
+# NOTE: match_thresh / appearance_thresh below are BoT-SORT's own cost-fusion
+# thresholds, NOT the same scale/meaning as MATCH_THRESH above. Retune on your
+# own footage — see Phase 1.4 in the migration plan.
 # ────────────────────────────────────────────────────
-TRACK_THRESH     = BOTSORT_HIGH_THRESH
-TRACK_BUFFER     = BOTSORT_TRACK_BUFFER
-MATCH_THRESH     = 0.65   # original ByteTrack value — kept for test assertions
-LOW_CONF_THRESH  = BOTSORT_LOW_THRESH
+TRACKER_BACKEND = os.getenv("TRACKER_BACKEND", "botsort")  # "botsort" | "bytetrack" (for A/B testing)
 
-# ReID Parameters (used by OSNetExtractor in multicam_manager.py)
-REID_SIMILARITY_THRESH = 0.62  # Cosine similarity threshold for cross-camera ReID
+BOTSORT_TRACK_BUFFER = int(os.getenv("BOTSORT_TRACK_BUFFER", "90"))      # start = old TRACK_BUFFER value
+BOTSORT_MATCH_THRESH = float(os.getenv("BOTSORT_MATCH_THRESH", "0.8"))   # sweep 0.7 / 0.8 / 0.9 on your footage
+BOTSORT_APPEARANCE_THRESH = float(os.getenv("BOTSORT_APPEARANCE_THRESH", "0.65"))  # start = old REID_SIMILARITY_THRESH
+BOTSORT_CMC_METHOD = "none"  # static ceiling camera — Camera Motion Compensation OFF, saves CPU
+BOTSORT_DEVICE = os.getenv("BOTSORT_DEVICE", "cpu")  # Pi 5 has no CUDA
+BOTSORT_HALF = False  # keep False until OSNET_PRECISION=="fp16" path is confirmed working end-to-end
+
+# ReID Parameters
+REID_SIMILARITY_THRESH = 0.65  # Cosine similarity threshold tau_reid (used by multicam_manager's lazy-ReID step)
 REID_FEATURE_DIM = 512
-REID_IMAGE_SIZE  = (128, 256)  # (width, height) for OSNet input
-REID_COST_WEIGHT = 0.55        # kept for any legacy references
-REID_EASY_THRESH = 0.30        # kept for any legacy references
+REID_IMAGE_SIZE = (128, 256)  # (width, height) for OSNet input
 
 # Transition Zone & Multi-Camera Parameters
 TRANSITION_TIME_WINDOW_SEC = 5.0
@@ -131,7 +97,7 @@ DEFAULT_CAMERAS_CONFIG: Dict[str, Dict[str, Any]] = {
         "floor": 1,
         "resolution": (1920, 1080),
         # RTSP URL for CCTV Lantai 1 — webcam for simulation, real CCTV for production
-        # Webcam:   "rtsp_url": "0"  (or integer index)
+        # Webcam: "rtsp_url": "0" (or integer index)
         # RTSP CCTV: "rtsp_url": "rtsp://admin:password@192.168.1.100:554/stream1"
         "rtsp_url": os.getenv("CAM_1_URL", "0"),
         "transition_zones": [
@@ -147,7 +113,7 @@ DEFAULT_CAMERAS_CONFIG: Dict[str, Dict[str, Any]] = {
         "name": "CCTV Ceiling - Lantai 2 (Seating & Tangga)",
         "floor": 2,
         "resolution": (1920, 1080),
-        # Webcam:   "rtsp_url": "1"  (second USB webcam)
+        # Webcam: "rtsp_url": "1" (second USB webcam)
         # RTSP CCTV: "rtsp_url": "rtsp://admin:password@192.168.1.101:554/stream1"
         "rtsp_url": os.getenv("CAM_2_URL", "1"),
         "transition_zones": [
@@ -170,14 +136,3 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 # Sync interval — how often (seconds) to push occupancy count to Supabase
 SYNC_INTERVAL_SEC = 1.0
-
-BACKEND_API_URL = 'http://localhost:8001/api/v1'
-
-# YOLO inference input size.
-# 640 is the native resolution for YOLO11n / YOLO26n and optimal for Edge CPU (RPi5 / Laptop).
-YOLO_INPUT_SIZE = 640
-
-# Enable 2nd-pass detection on the upper/far region of the frame.
-# False (default): 1-pass detection for high throughput on Edge CPU (RPi5 / laptop).
-# True: 2-pass detection to maximize recall on distant people (at ~2x compute cost).
-ENABLE_FAR_REGION_PASS = False
