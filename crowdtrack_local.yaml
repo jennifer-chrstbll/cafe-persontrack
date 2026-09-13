@@ -1,0 +1,19 @@
+id: crowdtrack-local
+
+format:
+  layout: mot
+  box_type: aabb
+
+storage:
+  root: CrowdTrack-MOT
+
+default_split: train
+
+splits:
+  train:
+    path: train
+    has_ground_truth: true
+
+classes:
+  target:
+    person: 1
