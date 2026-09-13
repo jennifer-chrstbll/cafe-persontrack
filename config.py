@@ -23,6 +23,14 @@ DETECTOR_PATHS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# detector.py expects "yolo11" / "yolo26" (no trailing 'n'), not "yolo11n" / "yolo26n"
+ACTIVE_MODEL = "yolo26" if DETECTOR_BACKEND == "yolo26n" else "yolo11"
+ 
+YOLO11_MODEL_PATH = DETECTOR_PATHS["yolo11n"][DETECTOR_PRECISION if DETECTOR_PRECISION in DETECTOR_PATHS["yolo11n"] else "onnx"]
+YOLO11_PT_PATH = DETECTOR_PATHS["yolo11n"]["pt"]
+YOLO26_MODEL_PATH = DETECTOR_PATHS["yolo26n"][DETECTOR_PRECISION if DETECTOR_PRECISION in DETECTOR_PATHS["yolo26n"] else "onnx"]
+YOLO26_PT_PATH = DETECTOR_PATHS["yolo26n"]["pt"]
+
 if DETECTOR_BACKEND not in DETECTOR_PATHS:
     raise ValueError(
         f"Unknown DETECTOR_BACKEND='{DETECTOR_BACKEND}'. "
