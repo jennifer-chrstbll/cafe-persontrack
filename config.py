@@ -68,8 +68,29 @@ _OSNET_PATHS = {
 OSNET_ACTIVE_PATH = _OSNET_PATHS[OSNET_PRECISION]
 
 # Detection Parameters
-DETECTION_CONF_THRESH = 0.35
+DETECTION_CONF_THRESH = 0.20
 PERSON_CLASS_ID = 0  # YOLO class 0 is 'person'
+
+# ────────────────────────────────────────────────────
+# Far-region second pass (detector.py's PersonDetector._detect_onnx) — crops
+# the top FAR_REGION_Y_FRAC of the frame and runs a second, more lenient pass,
+# merged via NMS.
+#
+# CONCLUSION FROM MOT17-04 TESTING: this measurably adds ZERO accuracy
+# (MOTA/IDF1/IDs were statistically identical with it on vs off) while roughly
+# doubling inference cost and risking OOM crashes when combined with a large
+# YOLO_INPUT_SIZE. Keep this False. Only revisit if real cafe footage testing
+# later shows a genuine small/distant-person recall gap that YOLO_INPUT_SIZE
+# alone doesn't fix.
+# ────────────────────────────────────────────────────
+ENABLE_FAR_REGION_PASS = os.getenv("ENABLE_FAR_REGION_PASS", "false").lower() == "true"
+
+# Inference input resolution (square, before letterbox). Higher = better small-
+# object recall but slower, AND on the full MOT17-04 sequence raising this to
+# 1280 nearly doubled ID switches (41 -> 80) versus 960, likely from noisier
+# marginal detections feeding the tracker. Keep 960 as the default until real
+# cafe footage (much less dense than MOT17-04) shows otherwise.
+YOLO_INPUT_SIZE = int(os.getenv("YOLO_INPUT_SIZE", "960"))
 
 # ────────────────────────────────────────────────────
 # Legacy ByteTrack Parameters — kept only for the A/B comparison path
@@ -86,15 +107,13 @@ LOW_CONF_THRESH = 0.1    # Threshold for low-confidence detections
 TRACKER_BACKEND = os.getenv("TRACKER_BACKEND", "botsort")  # "botsort" | "bytetrack" (for A/B testing)
 
 # Used by tracker/botsort_tracker.py (the actual BotSort(**kwargs) call).
-# Defaults below match boxmot's own BotSort.__init__ defaults — safe starting
-# points, not yet tuned to your footage.
-BOTSORT_HIGH_THRESH = float(os.getenv("BOTSORT_HIGH_THRESH", "0.5"))    # track_high_thresh & det_thresh
+BOTSORT_HIGH_THRESH = float(os.getenv("BOTSORT_HIGH_THRESH", "0.4"))    # track_high_thresh & det_thresh
 BOTSORT_LOW_THRESH = float(os.getenv("BOTSORT_LOW_THRESH", "0.1"))      # track_low_thresh
-BOTSORT_NEW_THRESH = float(os.getenv("BOTSORT_NEW_THRESH", "0.6"))      # new_track_thresh
-BOTSORT_PROXIMITY_THRESH = float(os.getenv("BOTSORT_PROXIMITY_THRESH", "0.5"))
+BOTSORT_NEW_THRESH = float(os.getenv("BOTSORT_NEW_THRESH", "0.5"))      # new_track_thresh
+BOTSORT_PROXIMITY_THRESH = float(os.getenv("BOTSORT_PROXIMITY_THRESH", "0.65"))
 BOTSORT_SECOND_MATCH_THRESH = float(os.getenv("BOTSORT_SECOND_MATCH_THRESH", "0.5"))
 
-BOTSORT_TRACK_BUFFER = int(os.getenv("BOTSORT_TRACK_BUFFER", "90"))
+BOTSORT_TRACK_BUFFER = int(os.getenv("BOTSORT_TRACK_BUFFER", "500"))
 BOTSORT_MATCH_THRESH = float(os.getenv("BOTSORT_MATCH_THRESH", "0.8"))
 BOTSORT_APPEARANCE_THRESH = float(os.getenv("BOTSORT_APPEARANCE_THRESH", "0.65"))
 BOTSORT_CMC_METHOD = "none"  # NOTE: tracker/botsort_tracker.py hardcodes use_cmc=False directly and

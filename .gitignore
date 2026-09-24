@@ -3,6 +3,8 @@
 *.avi
 *.mov
 *.mkv
+*.png
+*.jpg
 
 # Processed results directory
 results/

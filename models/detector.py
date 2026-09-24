@@ -39,6 +39,26 @@ def enhance_frame(frame: np.ndarray) -> np.ndarray:
     l_sh = cv2.addWeighted(l_eq, 1.5, blur, -0.5, 0)  # uint8 input -> saturates automatically, no np.clip needed
     return cv2.cvtColor(cv2.merge([l_sh, a, b]), cv2.COLOR_LAB2BGR)
 
+def _letterbox(frame: np.ndarray, input_size: int):
+    """Resize+pad to a square input_size x input_size canvas, preserving aspect
+    ratio. Returns (canvas, scale, pad_x, pad_y) so boxes can be mapped back
+    to original frame coordinates exactly.
+
+    IMPORTANT: do NOT replace this with a plain cv2.resize(frame, (size, size))
+    -- that squashes non-square frames (e.g. 1920x1080) with different x/y
+    scale factors, distorting every person's silhouette and hurting both
+    detection and ReID accuracy. This was removed by mistake once already --
+    keep it.
+    """
+    ih, iw = frame.shape[:2]
+    scale = min(input_size / iw, input_size / ih)
+    nw, nh = int(round(iw * scale)), int(round(ih * scale))
+    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((input_size, input_size, 3), 114, dtype=np.uint8)
+    pad_x = (input_size - nw) // 2
+    pad_y = (input_size - nh) // 2
+    canvas[pad_y:pad_y + nh, pad_x:pad_x + nw] = resized
+    return canvas, scale, pad_x, pad_y
 
 # ── ONNX inference primitives ─────────────────────────────────────────────────
 
@@ -50,8 +70,7 @@ def _onnx_infer_yolo11(session, frame: np.ndarray,
     YOLO11 ONNX inference — standard NMS output format.
     Output shape: (1, 84, 8400)
     """
-    ih, iw = frame.shape[:2]
-    img = cv2.resize(frame, (input_size, input_size))
+    img, scale, pad_x, pad_y = _letterbox(frame, input_size)
     img = img[:, :, ::-1]  # BGR->RGB
     blob = np.ascontiguousarray(img.transpose(2, 0, 1), dtype=np.float32)[None] / 255.0
 
@@ -65,12 +84,11 @@ def _onnx_infer_yolo11(session, frame: np.ndarray,
 
     boxes = pred[:4, mask].T
     scores = scores[mask]
-    sx, sy = iw / input_size, ih / input_size
     cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    x1 = (cx - w / 2) * sx
-    y1 = (cy - h / 2) * sy
-    x2 = (cx + w / 2) * sx
-    y2 = (cy + h / 2) * sy
+    x1 = (cx - w / 2 - pad_x) / scale
+    y1 = (cy - h / 2 - pad_y) / scale
+    x2 = (cx + w / 2 - pad_x) / scale
+    y2 = (cy + h / 2 - pad_y) / scale
 
     # Aspect ratio filter (relaxed for partial body / head-only crops)
     ratio = (y2 - y1) / np.maximum(x2 - x1, 1.0)
@@ -101,15 +119,13 @@ def _onnx_infer_yolo26(session, frame: np.ndarray,
     Output shape: (1, 300, 6) where 6 = [x1, y1, x2, y2, conf, class_id]
     Allows candidates down to low_thresh so ByteTrack can use them in Step 2.
     """
-    ih, iw = frame.shape[:2]
-    img = cv2.resize(frame, (input_size, input_size))
+    img, scale, pad_x, pad_y = _letterbox(frame, input_size)
     img = img[:, :, ::-1]  # BGR->RGB
     blob = np.ascontiguousarray(img.transpose(2, 0, 1), dtype=np.float32)[None] / 255.0
 
     out = session.run(None, {session.get_inputs()[0].name: blob})
     preds = out[0][0]  # (300, 6)
 
-    sx, sy = iw / input_size, ih / input_size
     dets = []
     for row in preds:
         x1, y1, x2, y2, conf, cls_id = row
@@ -118,8 +134,11 @@ def _onnx_infer_yolo26(session, frame: np.ndarray,
         # Use low_thresh here identically to YOLO11 so ByteTrack gets low-confidence tier
         if conf < low_thresh:
             continue
-        # Scale back to original frame coords
-        x1 *= sx; y1 *= sy; x2 *= sx; y2 *= sy
+        # Unletterbox back to original frame coords
+        x1 = (x1 - pad_x) / scale
+        y1 = (y1 - pad_y) / scale
+        x2 = (x2 - pad_x) / scale
+        y2 = (y2 - pad_y) / scale
         # Aspect ratio filter (relaxed for partial body)
         h_box = y2 - y1
         w_box = x2 - x1

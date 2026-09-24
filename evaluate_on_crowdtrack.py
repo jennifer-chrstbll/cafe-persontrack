@@ -48,17 +48,40 @@ from tracker.botsort_tracker import BotSortTracker
 
 
 def load_gt(gt_path: str) -> dict:
-    """Baca gt.txt format MOT: frame,id,x,y,w,h,... -> {frame: [(id,x,y,w,h), ...]}"""
+    """
+    Baca gt.txt format MOT: frame,id,x,y,w,h,conf,class,visibility
+    -> {frame: [(id,x,y,w,h), ...]}
+
+    Mengikuti konvensi resmi MOTChallenge evaluation:
+    - conf==0 berarti baris ini ditandai "ignore", tidak dihitung sama sekali.
+    - class harus == 1 (pedestrian). Kelas lain (2=person_on_vehicle,
+      7=static_person, 8=distractor, 12=reflection, dst) BUKAN target nyata --
+      biasanya manekin, pantulan cermin, dsb -- dan harus dibuang, kalau tidak
+      GT count akan meledak dan FN jadi menyesatkan (kasus MOT17-04 yang
+      settingnya di mall, penuh manekin & cermin).
+
+    Kalau file gt.txt cuma 6 kolom (mis. dataset CrowdTrack-MOT yang sudah
+    single-class 'person' semua), filter ini otomatis dilewati -- semua baris
+    tetap dipakai seperti sebelumnya.
+    """
     gt = {}
-    with open(gt_path, "r") as f:
-        for line in f:
-            parts = line.strip().split(",")
-            if len(parts) < 6:
+    for line in open(gt_path, "r"):
+        parts = line.strip().split(",")
+        if len(parts) < 6:
+            continue
+        frame = int(float(parts[0]))
+        tid = int(float(parts[1]))
+        x, y, w, h = (float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]))
+
+        if len(parts) >= 8:
+            conf = float(parts[6])
+            cls = int(float(parts[7]))
+            if conf == 0:
                 continue
-            frame = int(float(parts[0]))
-            tid = int(float(parts[1]))
-            x, y, w, h = (float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]))
-            gt.setdefault(frame, []).append((tid, x, y, w, h))
+            if cls != 1:
+                continue
+
+        gt.setdefault(frame, []).append((tid, x, y, w, h))
     return gt
 
 
